@@ -1,288 +1,418 @@
-import type { Hex } from "viem";
+import type { Hex, Address } from "viem";
+import {
+  createAuthRequestMessage,
+  createAuthVerifyMessageFromChallenge,
+  createAppSessionMessage,
+  createSubmitAppStateMessage,
+  createCloseAppSessionMessage,
+  createPingMessage,
+  RPCProtocolVersion,
+  type MessageSigner,
+} from "@erc7824/nitrolite";
 
-const CLEARNODE_SANDBOX = "wss://clearnet-sandbox.yellow.com/ws";
+const CLEARNODE_URL = "wss://clearnet-sandbox.yellow.com/ws";
 
-export type MessageSigner = (message: string) => Promise<string>;
+const PAYMENT_ASSET = "ytest.usd";
+
+export const AUTH_SCOPE = "console";
+export const AUTH_APPLICATION = "queryfi-defi-agent";
+export const AUTH_ALLOWANCES = [{ asset: PAYMENT_ASSET, amount: "10000000" }];
+export const AUTH_DURATION_SECS = 86400;
 
 interface PaymentResult {
   queryId: string;
   amount: string;
   instant: boolean;
-  signature?: string;
+  appSessionId: Hex;
+  version: number;
 }
 
 interface PendingRequest {
   resolve: (value: any) => void;
   reject: (error: Error) => void;
+  timeout: ReturnType<typeof setTimeout>;
 }
 
 export class YellowPaymentClient {
   private ws: WebSocket | null = null;
-  private messageSigner: MessageSigner | null = null;
-  private userAddress: string = "";
-  private agentAddress: string = "";
-  private sessionId: string | null = null;
-  private balance: string = "0";
+  private authSigner: MessageSigner | null = null;
+  private sessionSigner: MessageSigner | null = null;
+  private sessionKeyAddress: Address = "0x0" as Address;
+  private userAddress: Address = "0x0" as Address;
+  private agentAddress: Address = "0x0" as Address;
+  private appSessionId: Hex | null = null;
+  private stateVersion: number = 0;
+  private userBalance: bigint = 0n;
+  private agentBalance: bigint = 0n;
   private connected: boolean = false;
+  private authenticated: boolean = false;
   private pendingRequests: Map<string, PendingRequest> = new Map();
-  private requestIdCounter: number = 0;
+  private pingInterval: ReturnType<typeof setInterval> | null = null;
+  private onBalanceChange?: (userBalance: string, agentBalance: string) => void;
+  private expiresAt: bigint = 0n;
 
-  /**
-   * Connect to Yellow Network ClearNode
-   */
-  async connect(userAddress: string, signer: MessageSigner): Promise<void> {
+  async connect(
+    userAddress: Address,
+    sessionKeyAddress: Address,
+    authSigner: MessageSigner,
+    sessionSigner: MessageSigner,
+    expiresAt: bigint,
+    onBalanceChange?: (userBalance: string, agentBalance: string) => void,
+  ): Promise<void> {
     this.userAddress = userAddress;
-    this.messageSigner = signer;
+    this.sessionKeyAddress = sessionKeyAddress;
+    this.authSigner = authSigner;
+    this.sessionSigner = sessionSigner;
+    this.expiresAt = expiresAt;
+    this.onBalanceChange = onBalanceChange;
 
-    // For hackathon demo: simulate connection without real WebSocket
-    // Yellow Network sandbox requires pre-existing channel setup
-    console.log("✅ Connected to Yellow Network ClearNode (simulated)");
-    this.connected = true;
-    return Promise.resolve();
-  }
+    return new Promise<void>((resolve, reject) => {
+      this.ws = new WebSocket(CLEARNODE_URL);
 
-  /**
-   * Connect to real Yellow Network (for production)
-   */
-  async connectReal(userAddress: string, signer: MessageSigner): Promise<void> {
-    this.userAddress = userAddress;
-    this.messageSigner = signer;
+      const connectTimeout = setTimeout(() => {
+        reject(new Error("WebSocket connection timeout"));
+        this.ws?.close();
+      }, 15000);
 
-    return new Promise((resolve, reject) => {
-      this.ws = new WebSocket(CLEARNODE_SANDBOX);
-
-      this.ws.onopen = () => {
-        console.log("✅ Connected to Yellow Network ClearNode");
+      this.ws.onopen = async () => {
+        clearTimeout(connectTimeout);
+        console.log("[Yellow] WebSocket connected to ClearNode");
         this.connected = true;
-        resolve();
+
+        try {
+          await this.authenticate();
+          this.startPingLoop();
+          resolve();
+        } catch (err) {
+          reject(err);
+        }
       };
 
       this.ws.onmessage = (event) => {
-        this.handleMessage(event.data);
+        this.handleMessage(event.data as string);
       };
 
       this.ws.onerror = (error) => {
-        console.error("❌ Yellow Network WebSocket error:", error);
-        reject(error);
+        clearTimeout(connectTimeout);
+        console.error("[Yellow] WebSocket error:", error);
+        reject(new Error("WebSocket connection failed"));
       };
 
       this.ws.onclose = () => {
-        console.log("🔌 Disconnected from Yellow Network");
+        console.log("[Yellow] WebSocket disconnected");
         this.connected = false;
+        this.authenticated = false;
+        this.stopPingLoop();
       };
     });
   }
 
-  /**
-   * Create a payment session with the agent
-   */
+  private async authenticate(): Promise<void> {
+    if (!this.ws || !this.authSigner) throw new Error("Not connected");
+
+    const authRequestMsg = await createAuthRequestMessage({
+      address: this.userAddress,
+      session_key: this.sessionKeyAddress,
+      application: AUTH_APPLICATION,
+      allowances: AUTH_ALLOWANCES,
+      expires_at: this.expiresAt,
+      scope: AUTH_SCOPE,
+    });
+
+    const challengePromise = this.waitForRawResponse("auth_challenge", 15000);
+
+    this.ws.send(authRequestMsg);
+
+    const rawResponse = await challengePromise;
+    const challenge = rawResponse.res[2].challenge_message;
+    console.log("[Yellow] Got challenge, requesting wallet signature...");
+
+    const verifyPromise = this.waitForRawResponse("auth_verify", 30000);
+
+    const authVerifyMsg = await createAuthVerifyMessageFromChallenge(
+      this.authSigner,
+      challenge,
+    );
+
+    this.ws.send(authVerifyMsg);
+
+    const verifyResponse = await verifyPromise;
+    if (verifyResponse.res[2].success === false) {
+      throw new Error("Authentication rejected by ClearNode");
+    }
+
+    this.authenticated = true;
+    console.log("[Yellow] Authenticated successfully");
+  }
+
   async createPaymentSession(
-    agentAddress: string,
-    initialDeposit: string
-  ): Promise<string> {
-    if (!this.messageSigner || !this.connected) {
-      throw new Error("Not connected");
+    agentAddress: Address,
+    initialDeposit: string,
+  ): Promise<Hex> {
+    if (!this.ws || !this.sessionSigner || !this.authenticated) {
+      throw new Error("Not connected or not authenticated");
     }
 
     this.agentAddress = agentAddress;
-    this.balance = initialDeposit;
+    this.userBalance = BigInt(initialDeposit);
+    this.agentBalance = 0n;
+    this.stateVersion = 0;
 
-    const requestId = this.generateRequestId();
-    const timestamp = Date.now();
-
-    // Create app session request following Nitrolite RPC format
-    const params = {
+    const sessionMsg = await createAppSessionMessage(this.sessionSigner, {
       definition: {
-        application: "queryfi-pay-per-query",
-        protocol: "NitroRPC/0.2",
-        participants: [this.userAddress, agentAddress],
+        application: AUTH_APPLICATION,
+        protocol: RPCProtocolVersion.NitroRPC_0_2,
+        participants: [this.userAddress, this.agentAddress],
         weights: [100, 0],
         quorum: 100,
         challenge: 0,
-        nonce: timestamp,
+        nonce: Date.now(),
       },
       allocations: [
         {
           participant: this.userAddress,
-          asset: "usdc",
+          asset: PAYMENT_ASSET,
           amount: initialDeposit,
         },
         {
-          participant: agentAddress,
-          asset: "usdc",
+          participant: this.agentAddress,
+          asset: PAYMENT_ASSET,
           amount: "0",
         },
       ],
-    };
+    });
 
-    // Create the RPC message
-    const rpcData = [requestId, "create_app_session", params, timestamp];
-    const messageToSign = JSON.stringify(rpcData);
+    const sessionPromise = this.waitForRawResponse("create_app_session", 30000);
+    this.ws.send(sessionMsg);
+    const response = await sessionPromise;
 
-    try {
-      // Sign the message to prove intent (off-chain signature)
-      const signature = await this.messageSigner!(messageToSign);
+    this.appSessionId = response.res[2].app_session_id;
+    this.stateVersion = response.res[2].version ?? 0;
+    console.log("[Yellow] App session created:", this.appSessionId);
 
-      // For hackathon demo: simulate session creation
-      // In production, this would send to Yellow Network
-      this.sessionId = `session_${timestamp}`;
-      console.log("📝 Session created:", this.sessionId);
-      console.log("🔏 Signature:", signature.slice(0, 20) + "...");
-
-      return this.sessionId;
-    } catch (error) {
-      throw error;
-    }
+    return this.appSessionId!;
   }
 
-  /**
-   * Send a micropayment for a query
-   */
   async sendMicropayment(
     amount: string,
-    queryId: string
+    queryId: string,
   ): Promise<PaymentResult> {
-    if (!this.messageSigner || !this.connected) {
-      throw new Error("Not connected");
-    }
-
-    if (!this.sessionId) {
+    if (!this.ws || !this.sessionSigner || !this.appSessionId) {
       throw new Error("No active session");
     }
 
-    // Create payment data
-    const paymentData = {
-      type: "micropayment",
-      amount, // In USDC units (6 decimals: 10000 = $0.01)
-      queryId,
-      timestamp: Date.now(),
-      sessionId: this.sessionId,
-    };
+    const paymentAmount = BigInt(amount);
+    if (paymentAmount > this.userBalance) {
+      throw new Error(
+        `Insufficient balance: have ${this.userBalance}, need ${paymentAmount}`,
+      );
+    }
 
-    // For hackathon demo: simulate payment without signature prompt
-    // This demonstrates the UX of instant, gasless micropayments
-    // In production, each payment would be signed and sent to Yellow Network
-    console.log("💰 Micropayment:", `$${(Number(amount) / 1_000_000).toFixed(2)}`, "for query:", queryId);
+    const newUserBalance = this.userBalance - paymentAmount;
+    const newAgentBalance = this.agentBalance + paymentAmount;
 
-    // Update local balance
-    this.balance = String(Number(this.balance) - Number(amount));
+    const stateMsg =
+      await createSubmitAppStateMessage<RPCProtocolVersion.NitroRPC_0_2>(
+        this.sessionSigner,
+        {
+          app_session_id: this.appSessionId,
+          allocations: [
+            {
+              participant: this.userAddress,
+              asset: PAYMENT_ASSET,
+              amount: newUserBalance.toString(),
+            },
+            {
+              participant: this.agentAddress,
+              asset: PAYMENT_ASSET,
+              amount: newAgentBalance.toString(),
+            },
+          ],
+          session_data: JSON.stringify({ queryId, timestamp: Date.now() }),
+        },
+      );
+
+    const statePromise = this.waitForRawResponse("submit_app_state", 15000);
+    this.ws.send(stateMsg);
+    const response = await statePromise;
+
+    this.userBalance = newUserBalance;
+    this.agentBalance = newAgentBalance;
+    this.stateVersion = response.res[2].version ?? this.stateVersion + 1;
+
+    console.log(
+      `[Yellow] Payment: $${(Number(amount) / 1_000_000).toFixed(2)} for query ${queryId}`,
+    );
+
+    this.onBalanceChange?.(
+      this.userBalance.toString(),
+      this.agentBalance.toString(),
+    );
 
     return {
       queryId,
       amount,
       instant: true,
-      signature: "simulated",
+      appSessionId: this.appSessionId,
+      version: this.stateVersion,
     };
   }
 
-  /**
-   * Handle incoming WebSocket messages
-   */
-  private handleMessage(data: string): void {
+  async closeSession(): Promise<void> {
+    if (!this.ws || !this.sessionSigner || !this.appSessionId) return;
+
+    const closeMsg = await createCloseAppSessionMessage(this.sessionSigner, {
+      app_session_id: this.appSessionId,
+      allocations: [
+        {
+          participant: this.userAddress,
+          asset: PAYMENT_ASSET,
+          amount: this.userBalance.toString(),
+        },
+        {
+          participant: this.agentAddress,
+          asset: PAYMENT_ASSET,
+          amount: this.agentBalance.toString(),
+        },
+      ],
+    });
+
+    const closePromise = this.waitForRawResponse("close_app_session", 30000);
+    this.ws.send(closeMsg);
+    await closePromise;
+    console.log("[Yellow] Session closed, settlement initiated");
+    this.appSessionId = null;
+  }
+
+  private handleMessage(raw: string): void {
     try {
-      const message = JSON.parse(data);
+      const parsed = JSON.parse(raw);
 
-      // Handle session creation response
-      if (message.result?.app_session_id) {
-        this.sessionId = message.result.app_session_id;
-        const pending = this.pendingRequests.get("session_create");
+      if (parsed.res && Array.isArray(parsed.res)) {
+        const method = parsed.res[1] as string;
+
+        const pending = this.pendingRequests.get(method);
         if (pending) {
-          pending.resolve(this.sessionId);
-          this.pendingRequests.delete("session_create");
-        }
-        console.log("📝 Session created:", this.sessionId);
-        return;
-      }
+          clearTimeout(pending.timeout);
+          this.pendingRequests.delete(method);
 
-      // Handle RPC response format
-      if (message.res && Array.isArray(message.res)) {
-        const [, , result] = message.res;
-        if (result?.app_session_id) {
-          this.sessionId = result.app_session_id;
-          const pending = this.pendingRequests.get("session_create");
-          if (pending) {
-            pending.resolve(this.sessionId);
-            this.pendingRequests.delete("session_create");
+          if (method === "error") {
+            const errorMsg = parsed.res[2]?.error || "Unknown error";
+            pending.reject(new Error(errorMsg));
+            return;
           }
-          console.log("📝 Session created:", this.sessionId);
+
+          pending.resolve(parsed);
           return;
         }
-      }
 
-      // Handle payment confirmation
-      if (message.method === "payment_confirmed") {
-        console.log("💰 Payment confirmed:", message.params?.amount);
-        return;
-      }
-
-      // Handle errors
-      if (message.error) {
-        console.error("❌ Yellow error:", message.error);
-        // Reject any pending requests
-        for (const [key, pending] of this.pendingRequests) {
-          pending.reject(new Error(message.error.message || "Unknown error"));
+        if (method === "error" && this.pendingRequests.size > 0) {
+          const errorMsg = parsed.res[2]?.error || "Unknown error";
+          console.error("[Yellow] Error while request pending:", errorMsg);
+          const [key, firstPending] = this.pendingRequests.entries().next()
+            .value as [string, PendingRequest];
+          clearTimeout(firstPending.timeout);
           this.pendingRequests.delete(key);
+          firstPending.reject(new Error(errorMsg));
+          return;
         }
-        return;
-      }
 
-      // Handle balance updates
-      if (message.method === "balance_update") {
-        this.balance = message.params?.balance || this.balance;
-        console.log("💵 Balance updated:", this.balance);
-        return;
+        switch (method) {
+          case "bu":
+            console.log("[Yellow] Balance update received");
+            break;
+          case "ping":
+            this.sendPong();
+            break;
+          case "assets":
+            console.log("[Yellow] Assets list received");
+            break;
+          case "error":
+            console.error("[Yellow] Error:", parsed.res[2]?.error);
+            break;
+          default:
+            console.log("[Yellow] Unhandled message:", method);
+        }
       }
     } catch (error) {
-      console.error("Failed to parse message:", error);
+      console.error("[Yellow] Failed to parse message:", error);
     }
   }
 
-  /**
-   * Generate unique request ID
-   */
-  private generateRequestId(): string {
-    this.requestIdCounter++;
-    return `req_${Date.now()}_${this.requestIdCounter}`;
+  private waitForRawResponse(method: string, timeoutMs: number): Promise<any> {
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        this.pendingRequests.delete(method);
+        reject(new Error(`Timeout waiting for ${method} response`));
+      }, timeoutMs);
+
+      this.pendingRequests.set(method, { resolve, reject, timeout });
+    });
   }
 
-  /**
-   * Get current channel balance
-   */
+  private async sendPong(): Promise<void> {
+    if (!this.ws || !this.sessionSigner) return;
+    try {
+      const pingMsg = await createPingMessage(this.sessionSigner);
+      this.ws.send(pingMsg);
+    } catch {}
+  }
+
+  private startPingLoop(): void {
+    this.pingInterval = setInterval(async () => {
+      if (this.ws?.readyState === WebSocket.OPEN && this.sessionSigner) {
+        try {
+          const pingMsg = await createPingMessage(this.sessionSigner);
+          this.ws.send(pingMsg);
+        } catch {}
+      }
+    }, 30000);
+  }
+
+  private stopPingLoop(): void {
+    if (this.pingInterval) {
+      clearInterval(this.pingInterval);
+      this.pingInterval = null;
+    }
+  }
+
   getBalance(): string {
-    return this.balance;
+    return this.userBalance.toString();
   }
 
-  /**
-   * Get session ID
-   */
-  getSessionId(): string | null {
-    return this.sessionId;
+  getAgentBalance(): string {
+    return this.agentBalance.toString();
   }
 
-  /**
-   * Get user address
-   */
-  getUserAddress(): string {
-    return this.userAddress;
+  getSessionId(): Hex | null {
+    return this.appSessionId;
   }
 
-  /**
-   * Check if connected
-   */
+  getVersion(): number {
+    return this.stateVersion;
+  }
+
   isConnected(): boolean {
-    return this.connected && this.ws?.readyState === WebSocket.OPEN;
+    return this.connected && this.authenticated;
   }
 
-  /**
-   * Disconnect from Yellow Network
-   */
   disconnect(): void {
+    this.stopPingLoop();
     if (this.ws) {
       this.ws.close();
       this.ws = null;
     }
     this.connected = false;
-    this.sessionId = null;
-    this.balance = "0";
+    this.authenticated = false;
+    this.appSessionId = null;
+    this.userBalance = 0n;
+    this.agentBalance = 0n;
+    this.stateVersion = 0;
+
+    for (const [key, pending] of this.pendingRequests) {
+      clearTimeout(pending.timeout);
+      pending.reject(new Error("Disconnected"));
+      this.pendingRequests.delete(key);
+    }
   }
 }

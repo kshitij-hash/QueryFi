@@ -1,36 +1,36 @@
 "use client";
 
-import { useState, useCallback, useRef } from "react";
-import { useAccount, useSignMessage } from "wagmi";
-import { YellowPaymentClient } from "@/lib/yellow-client";
+import { useState, useCallback, useRef, useEffect } from "react";
+import { useAccount, useWalletClient } from "wagmi";
+import { type Hex, type Address } from "viem";
+import {
+  YellowPaymentClient,
+  AUTH_SCOPE,
+  AUTH_APPLICATION,
+  AUTH_ALLOWANCES,
+  AUTH_DURATION_SECS,
+} from "@/lib/yellow-client";
+import {
+  createEIP712AuthMessageSigner,
+  createECDSAMessageSigner,
+} from "@erc7824/nitrolite";
+import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 
-const AGENT_ADDRESS =
-  process.env.NEXT_PUBLIC_AGENT_ADDRESS ||
-  "0x0000000000000000000000000000000000000000";
-
-interface PaymentResult {
-  queryId: string;
-  amount: string;
-  instant: boolean;
-  signature?: string;
-}
+const AGENT_ADDRESS = (process.env.NEXT_PUBLIC_AGENT_ADDRESS ||
+  "0x0000000000000000000000000000000000000000") as Address;
 
 export function useYellowPayment() {
   const { address } = useAccount();
-  const { signMessageAsync } = useSignMessage();
+  const { data: walletClient } = useWalletClient();
 
-  // Use ref to persist client across renders
   const clientRef = useRef<YellowPaymentClient | null>(null);
 
   const [isConnected, setIsConnected] = useState(false);
   const [balance, setBalance] = useState<string>("0");
-  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [sessionId, setSessionId] = useState<Hex | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  /**
-   * Get or create the Yellow client
-   */
   const getClient = useCallback(() => {
     if (!clientRef.current) {
       clientRef.current = new YellowPaymentClient();
@@ -38,13 +38,17 @@ export function useYellowPayment() {
     return clientRef.current;
   }, []);
 
-  /**
-   * Connect to Yellow Network and create payment session
-   * @param depositAmount Amount to deposit in USDC units (6 decimals)
-   */
+  useEffect(() => {
+    return () => {
+      clientRef.current?.disconnect();
+      clientRef.current = null;
+    };
+  }, []);
+
   const connect = useCallback(
     async (depositAmount: string) => {
       if (!address) throw new Error("Wallet not connected");
+      if (!walletClient) throw new Error("Wallet client not available");
 
       setIsLoading(true);
       setError(null);
@@ -52,16 +56,44 @@ export function useYellowPayment() {
       try {
         const client = getClient();
 
-        // Create signer function using wagmi
-        const signer = async (msg: string) => signMessageAsync({ message: msg });
+        const expiresAt = BigInt(
+          Math.floor(Date.now() / 1000) + AUTH_DURATION_SECS,
+        );
 
-        // Connect to Yellow Network
-        await client.connect(address, signer);
+        const sessionPrivateKey = generatePrivateKey();
+        const sessionAccount = privateKeyToAccount(sessionPrivateKey);
 
-        // Create payment session with agent
+        const authParams = {
+          scope: AUTH_SCOPE,
+          session_key: sessionAccount.address as Address,
+          expires_at: expiresAt,
+          allowances: AUTH_ALLOWANCES,
+        };
+
+        const eip712Signer = createEIP712AuthMessageSigner(
+          walletClient,
+          authParams,
+          { name: AUTH_APPLICATION },
+        );
+
+        const sessionSigner = createECDSAMessageSigner(sessionPrivateKey);
+
+        const onBalanceChange = (userBalance: string) => {
+          setBalance(userBalance);
+        };
+
+        await client.connect(
+          address as Address,
+          sessionAccount.address as Address,
+          eip712Signer,
+          sessionSigner,
+          expiresAt,
+          onBalanceChange,
+        );
+
         const newSessionId = await client.createPaymentSession(
           AGENT_ADDRESS,
-          depositAmount
+          depositAmount,
         );
 
         setIsConnected(true);
@@ -70,44 +102,48 @@ export function useYellowPayment() {
 
         return newSessionId;
       } catch (err) {
-        const message = err instanceof Error ? err.message : "Connection failed";
+        const message =
+          err instanceof Error ? err.message : "Connection failed";
         setError(message);
         throw err;
       } finally {
         setIsLoading(false);
       }
     },
-    [address, signMessageAsync, getClient]
+    [address, walletClient, getClient],
   );
 
-  /**
-   * Pay for a query
-   * @param queryId Unique identifier for the query
-   * @param priceUsdc Price in USDC (e.g., 0.01 for 1 cent)
-   */
   const payForQuery = useCallback(
-    async (queryId: string, priceUsdc: number): Promise<PaymentResult> => {
+    async (queryId: string, priceUsdc: number) => {
       const client = clientRef.current;
       if (!client || !isConnected) {
         throw new Error("Not connected to Yellow Network");
       }
 
-      // Convert price to 6-decimal USDC units
       const amount = String(Math.floor(priceUsdc * 1_000_000));
 
       const result = await client.sendMicropayment(amount, queryId);
 
-      // Update local balance
       setBalance(client.getBalance());
 
       return result;
     },
-    [isConnected]
+    [isConnected],
   );
 
-  /**
-   * Disconnect from Yellow Network
-   */
+  const closeSession = useCallback(async () => {
+    const client = clientRef.current;
+    if (!client) return;
+
+    try {
+      await client.closeSession();
+    } finally {
+      setIsConnected(false);
+      setBalance("0");
+      setSessionId(null);
+    }
+  }, []);
+
   const disconnect = useCallback(() => {
     const client = clientRef.current;
     if (client) {
@@ -121,27 +157,22 @@ export function useYellowPayment() {
     setError(null);
   }, []);
 
-  /**
-   * Format balance for display
-   */
   const formattedBalance = useCallback(() => {
     return (Number(balance) / 1_000_000).toFixed(2);
   }, [balance]);
 
   return {
-    // State
     isConnected,
     balance,
     sessionId,
     isLoading,
     error,
 
-    // Actions
     connect,
     payForQuery,
+    closeSession,
     disconnect,
 
-    // Helpers
     formattedBalance,
   };
 }
