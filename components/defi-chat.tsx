@@ -88,15 +88,24 @@ export function DeFiChat() {
       // Pay for query via state channel (instant, gasless)
       await payForQuery(queryId, price);
 
-      // TODO: Call AI backend API
-      // For now, simulate response
-      const mockResponse = getMockResponse(userMessage);
+      // Call AI backend API
+      const res = await fetch("/api/query", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ query: userMessage, queryId }),
+      });
+
+      const data = await res.json();
+
+      if (!res.ok) {
+        throw new Error(data.error || "Failed to get response");
+      }
 
       setMessages((prev) => [
         ...prev,
         {
           role: "assistant",
-          content: mockResponse,
+          content: data.response,
           cost: price,
         },
       ]);
@@ -237,48 +246,3 @@ export function DeFiChat() {
   );
 }
 
-// Mock response generator (to be replaced with actual AI backend)
-function getMockResponse(query: string): string {
-  const lower = query.toLowerCase();
-
-  if (lower.includes("yield") || lower.includes("apy")) {
-    return `Top ETH Yields (DeFi Llama):
-
-1. Lido stETH - 3.2% APY ($12.5B TVL)
-2. Rocket Pool rETH - 3.1% APY ($2.1B TVL)
-3. Aave v3 ETH - 2.8% APY ($1.8B TVL)
-4. Compound v3 ETH - 2.5% APY ($890M TVL)
-
-Recommendation: Lido offers the best risk-adjusted yield with high liquidity.`;
-  }
-
-  if (lower.includes("health") || lower.includes("liquidation")) {
-    return `Health Factor Analysis:
-
-Unable to fetch on-chain data for this address.
-
-General guidelines:
-- Health Factor > 2.0: Safe
-- Health Factor 1.5-2.0: Moderate risk
-- Health Factor < 1.5: Consider repaying debt
-- Health Factor < 1.1: High liquidation risk`;
-  }
-
-  if (lower.includes("impermanent") || lower.includes("il")) {
-    return `Impermanent Loss Calculator:
-
-For a 50% price change:
-- V2 LP: ~5.7% IL
-- V3 Concentrated (2x): ~11.4% IL
-
-IL is only realized when you withdraw. If fees earned > IL, you're still profitable.`;
-  }
-
-  return `I can help you with:
-- Finding best DeFi yields
-- Checking lending position health factors
-- Calculating impermanent loss
-- General DeFi questions
-
-What would you like to know?`;
-}
