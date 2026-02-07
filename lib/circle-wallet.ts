@@ -97,3 +97,36 @@ export async function withdrawToTreasury(amount: string) {
     destination: treasuryAddress,
   };
 }
+
+export async function executeContractCall(
+  contractAddress: string,
+  abiFunctionSignature: string,
+  abiParameters: string[]
+) {
+  const walletId = process.env.CIRCLE_WALLET_ID;
+  if (!walletId) {
+    throw new Error("Missing CIRCLE_WALLET_ID environment variable");
+  }
+
+  const client = getClient();
+
+  const response = await client.createContractExecutionTransaction({
+    walletId,
+    contractAddress,
+    abiFunctionSignature,
+    abiParameters,
+    fee: {
+      type: "level",
+      config: { feeLevel: "MEDIUM" },
+    },
+  });
+
+  const tx = response.data;
+
+  return {
+    transactionId: tx?.id ?? null,
+    state: tx?.state ?? "UNKNOWN",
+    contractAddress,
+    abiFunctionSignature,
+  };
+}
