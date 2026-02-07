@@ -14,11 +14,13 @@ import {
 /** GET — Return current settlement status (pending payments, history) */
 export async function GET() {
   try {
-    const accumulated = getAccumulated();
-    const payments = getPayments();
+    const [accumulated, payments, history, lastSettlement] = await Promise.all([
+      getAccumulated(),
+      getPayments(),
+      getSettlementHistory(),
+      getLastSettlementTime(),
+    ]);
     const threshold = getThreshold();
-    const history = getSettlementHistory();
-    const lastSettlement = getLastSettlementTime();
 
     return NextResponse.json({
       accumulated,
@@ -51,7 +53,7 @@ export async function POST(req: NextRequest) {
     }
 
     // Default action: trigger settlement
-    const accumulated = getAccumulated();
+    const accumulated = await getAccumulated();
     if (accumulated === 0) {
       return NextResponse.json(
         { error: "No accumulated payments to settle" },

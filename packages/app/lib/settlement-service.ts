@@ -139,7 +139,7 @@ export async function triggerOnChainSettlement(): Promise<SettlementResult> {
     throw new Error("Settlement already in progress");
   }
 
-  const accumulated = getAccumulated();
+  const accumulated = await getAccumulated();
   if (accumulated === 0) {
     throw new Error("No accumulated payments to settle");
   }
@@ -147,7 +147,7 @@ export async function triggerOnChainSettlement(): Promise<SettlementResult> {
   settlementInProgress = true;
 
   try {
-    const payments = getPayments();
+    const payments = await getPayments();
 
     // Use the most recent queryId padded to bytes32
     const latestQueryId =
@@ -181,7 +181,7 @@ export async function triggerOnChainSettlement(): Promise<SettlementResult> {
     );
 
     // Reset tracker after successful Base Sepolia submission
-    const settled = resetAfterSettlement();
+    const settled = await resetAfterSettlement();
 
     const chains = ["base-sepolia"];
     if (arcTxHash) chains.push("arc-testnet");
@@ -195,7 +195,7 @@ export async function triggerOnChainSettlement(): Promise<SettlementResult> {
       chains,
     };
 
-    addSettlementToHistory(settlementResult);
+    await addSettlementToHistory(settlementResult);
 
     console.log(
       `[Settlement] Recorded: ${settled.amount} micro-USDC, chains: ${chains.join(", ")}, base tx: ${txHash}${arcTxHash ? `, arc tx: ${arcTxHash}` : ""}`
@@ -237,7 +237,7 @@ export async function flushHookBalance(): Promise<{
  * Prevents concurrent settlement attempts.
  */
 export async function checkAndAutoSettle(): Promise<SettlementResult | null> {
-  if (!shouldSettle()) return null;
+  if (!(await shouldSettle())) return null;
   if (settlementInProgress) return null;
 
   try {
@@ -251,7 +251,7 @@ export async function checkAndAutoSettle(): Promise<SettlementResult | null> {
   }
 }
 
-export function getSettlementHistory(): SettlementResult[] {
+export async function getSettlementHistory(): Promise<SettlementResult[]> {
   return getPersistedHistory();
 }
 

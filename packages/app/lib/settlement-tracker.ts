@@ -1,19 +1,13 @@
-// Micropayment accumulator with file-based persistence
+// Micropayment accumulator with Neon Postgres persistence via Drizzle
 // Tracks off-chain Yellow Network payments and triggers on-chain settlement at threshold
-// State survives server restarts via a JSON file in the project root
+// State persists across serverless cold starts via Neon database
 
-import { readFileSync, writeFileSync } from "fs";
-import { join } from "path";
+import { db } from "@/lib/db";
+import { payments, settlements } from "@/lib/db/schema";
+import { sql } from "drizzle-orm";
+import { asc } from "drizzle-orm";
 
 const SETTLEMENT_THRESHOLD = 1_000_000; // 1 USDC in micro-units (6 decimals)
-
-const STATE_FILE = join(process.cwd(), ".settlement-state.json");
-
-interface PaymentRecord {
-  queryId: string;
-  amount: number;
-  timestamp: number;
-}
 
 export interface SettlementRecord {
   transactionId: string | null;
@@ -24,58 +18,39 @@ export interface SettlementRecord {
   chains: string[];
 }
 
-interface PersistedState {
-  accumulatedAmount: number;
-  payments: PaymentRecord[];
-  lastSettlementTime: number | null;
-  settlementHistory: SettlementRecord[];
-}
-
-function loadState(): PersistedState {
-  try {
-    const raw = readFileSync(STATE_FILE, "utf-8");
-    const parsed = JSON.parse(raw) as PersistedState;
-    // Ensure settlementHistory exists (backwards compat with old state files)
-    if (!parsed.settlementHistory) parsed.settlementHistory = [];
-    return parsed;
-  } catch {
-    return { accumulatedAmount: 0, payments: [], lastSettlementTime: null, settlementHistory: [] };
-  }
-}
-
-function saveState(state: PersistedState): void {
-  try {
-    writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
-  } catch (err) {
-    console.error("[SettlementTracker] Failed to persist state:", err);
-  }
-}
-
-export function recordPayment(queryId: string, amountMicroUsdc: number) {
-  const state = loadState();
-  state.accumulatedAmount += amountMicroUsdc;
-  state.payments.push({
+export async function recordPayment(queryId: string, amountMicroUsdc: number) {
+  await db.insert(payments).values({
     queryId,
     amount: amountMicroUsdc,
     timestamp: Date.now(),
   });
-  saveState(state);
 }
 
-export function getAccumulated(): number {
-  return loadState().accumulatedAmount;
+export async function getAccumulated(): Promise<number> {
+  const [paymentSum] = await db
+    .select({ total: sql<number>`coalesce(sum(${payments.amount}), 0)` })
+    .from(payments);
+
+  return Number(paymentSum.total);
 }
 
-export function getPayments(): PaymentRecord[] {
-  return [...loadState().payments];
+export async function getPayments() {
+  return db.select().from(payments).orderBy(asc(payments.timestamp));
 }
 
-export function getLastSettlementTime(): number | null {
-  return loadState().lastSettlementTime;
+export async function getLastSettlementTime(): Promise<number | null> {
+  const [latest] = await db
+    .select({ timestamp: settlements.timestamp })
+    .from(settlements)
+    .orderBy(sql`${settlements.timestamp} desc`)
+    .limit(1);
+
+  return latest?.timestamp ?? null;
 }
 
-export function shouldSettle(): boolean {
-  return loadState().accumulatedAmount >= SETTLEMENT_THRESHOLD;
+export async function shouldSettle(): Promise<boolean> {
+  const accumulated = await getAccumulated();
+  return accumulated >= SETTLEMENT_THRESHOLD;
 }
 
 export function getThreshold(): number {
@@ -83,30 +58,50 @@ export function getThreshold(): number {
 }
 
 /** Resets the tracker after a successful on-chain settlement. Returns the settled data. */
-export function resetAfterSettlement(): {
+export async function resetAfterSettlement(): Promise<{
   amount: number;
-  payments: PaymentRecord[];
-} {
-  const state = loadState();
-  const settled = {
-    amount: state.accumulatedAmount,
-    payments: [...state.payments],
+  payments: { queryId: string; amount: number; timestamp: number }[];
+}> {
+  const rows = await db.select().from(payments).orderBy(asc(payments.timestamp));
+  const amount = rows.reduce((sum, r) => sum + r.amount, 0);
+
+  await db.delete(payments);
+
+  return {
+    amount,
+    payments: rows.map((r) => ({
+      queryId: r.queryId,
+      amount: r.amount,
+      timestamp: r.timestamp,
+    })),
   };
-  state.accumulatedAmount = 0;
-  state.payments = [];
-  state.lastSettlementTime = Date.now();
-  saveState(state);
-  return settled;
 }
 
 /** Add a completed settlement to the persisted history */
-export function addSettlementToHistory(record: SettlementRecord): void {
-  const state = loadState();
-  state.settlementHistory.push(record);
-  saveState(state);
+export async function addSettlementToHistory(record: SettlementRecord): Promise<void> {
+  await db.insert(settlements).values({
+    transactionId: record.transactionId,
+    arcTransactionHash: record.arcTransactionHash,
+    amount: record.amount,
+    queryIds: record.queryIds,
+    timestamp: record.timestamp,
+    chains: record.chains,
+  });
 }
 
 /** Get persisted settlement history */
-export function getSettlementHistory(): SettlementRecord[] {
-  return [...loadState().settlementHistory];
+export async function getSettlementHistory(): Promise<SettlementRecord[]> {
+  const rows = await db
+    .select()
+    .from(settlements)
+    .orderBy(asc(settlements.timestamp));
+
+  return rows.map((r) => ({
+    transactionId: r.transactionId,
+    arcTransactionHash: r.arcTransactionHash,
+    amount: r.amount,
+    queryIds: r.queryIds,
+    timestamp: r.timestamp,
+    chains: r.chains,
+  }));
 }

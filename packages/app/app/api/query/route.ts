@@ -28,7 +28,7 @@ export async function POST(request: NextRequest) {
         : DEFAULT_QUERY_COST_MICRO_USDC;
 
     // Record the micropayment for this query
-    recordPayment(queryId, amountMicroUsdc);
+    await recordPayment(queryId, amountMicroUsdc);
 
     // Auto-settle in background if threshold is reached (fire-and-forget)
     checkAndAutoSettle().catch((err) =>

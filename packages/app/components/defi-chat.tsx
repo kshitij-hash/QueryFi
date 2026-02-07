@@ -36,9 +36,13 @@ const QUERY_PRICES: Record<string, number> = {
 };
 
 const EXAMPLE_QUERIES = [
+  { text: "Show Uniswap v4 pool state", price: "$0.01" },
+  { text: "How many swaps has the hook tracked?", price: "$0.01" },
+  { text: "Lower settlement threshold to $0.50", price: "$0.01" },
+  { text: "Check agent wallet balance", price: "$0.01" },
   { text: "Best yield for ETH?", price: "$0.05" },
   { text: "Calculate IL for ETH $2000→$3000", price: "$0.03" },
-  { text: "What's the price of ETH?", price: "$0.01" },
+  { text: "What's the price of BTC?", price: "$0.01" },
   { text: "What is a flash loan?", price: "$0.01" },
 ];
 
@@ -311,8 +315,8 @@ export function DeFiChat() {
           <div ref={scrollRef} />
         </ScrollArea>
 
-        {/* Example query chips — hidden once conversation starts */}
-        {isChannelConnected && !isLoading && !hasConversation && (
+        {/* Example query chips */}
+        {isChannelConnected && !isLoading && (
           <div className="shrink-0 px-4 pt-3 pb-1 border-t border-border">
             <p className="text-xs text-muted-foreground mb-2">Try asking:</p>
             <div className="flex flex-wrap gap-1.5">
