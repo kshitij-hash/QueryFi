@@ -26,12 +26,11 @@ const QUERY_PRICES: Record<string, number> = {
 };
 
 export function DeFiChat() {
-  const { address, isConnected: isWalletConnected } = useAccount();
+  const { isConnected: isWalletConnected } = useAccount();
   const {
     connect,
     payForQuery,
     isConnected: isChannelConnected,
-    balance,
     formattedBalance,
     isLoading: isConnecting,
     error: connectionError,
@@ -92,7 +91,7 @@ export function DeFiChat() {
       const res = await fetch("/api/query", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query: userMessage, queryId }),
+        body: JSON.stringify({ query: userMessage, queryId, price }),
       });
 
       const data = await res.json();
@@ -135,19 +134,17 @@ export function DeFiChat() {
   return (
     <Card className="flex flex-col h-[500px] overflow-hidden">
       {/* Balance Header */}
-      <div className="flex-shrink-0 p-4 border-b border-border flex justify-between items-center">
+      <div className="shrink-0 p-4 border-b border-border flex justify-between items-center">
         <div>
-          <span className="text-sm text-muted-foreground">Channel Balance:</span>
+          <span className="text-sm text-muted-foreground">
+            Channel Balance:
+          </span>
           <span className="ml-2 font-mono font-bold">
             ${formattedBalance()} USDC
           </span>
         </div>
         {!isChannelConnected ? (
-          <Button
-            onClick={handleOpenChannel}
-            disabled={isConnecting}
-            size="sm"
-          >
+          <Button onClick={handleOpenChannel} disabled={isConnecting} size="sm">
             {isConnecting ? (
               <>
                 <Spinner className="size-3.5 mr-2" />
@@ -216,7 +213,7 @@ export function DeFiChat() {
       </ScrollArea>
 
       {/* Input */}
-      <div className="flex-shrink-0 p-4 border-t border-border flex gap-2">
+      <div className="shrink-0 p-4 border-t border-border flex gap-2">
         <Input
           value={input}
           onChange={(e) => setInput(e.target.value)}
@@ -238,11 +235,10 @@ export function DeFiChat() {
 
       {/* Error Display */}
       {connectionError && (
-        <div className="flex-shrink-0 p-2 bg-red-500/20 text-red-400 text-sm text-center">
+        <div className="shrink-0 p-2 bg-red-500/20 text-red-400 text-sm text-center">
           {connectionError}
         </div>
       )}
     </Card>
   );
 }
-

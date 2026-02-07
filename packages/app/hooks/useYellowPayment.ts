@@ -82,6 +82,14 @@ export function useYellowPayment() {
           setBalance(userBalance);
         };
 
+        const onDisconnect = () => {
+          console.log("[Yellow] Connection lost, resetting state");
+          setIsConnected(false);
+          setBalance("0");
+          setSessionId(null);
+          setError("Connection lost. Please reopen the channel.");
+        };
+
         await client.connect(
           address as Address,
           sessionAccount.address as Address,
@@ -89,6 +97,7 @@ export function useYellowPayment() {
           sessionSigner,
           expiresAt,
           onBalanceChange,
+          onDisconnect,
         );
 
         const newSessionId = await client.createPaymentSession(

@@ -65,6 +65,8 @@ export async function POST(req: NextRequest) {
       success: true,
       settlement: {
         transactionId: result.transactionId,
+        arcTransactionHash: result.arcTransactionHash,
+        chains: result.chains,
         amount: result.amount,
         amountUsdc: (result.amount / 1_000_000).toFixed(6),
         queryIds: result.queryIds,

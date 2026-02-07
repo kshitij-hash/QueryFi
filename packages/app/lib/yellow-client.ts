@@ -28,6 +28,7 @@ interface PaymentResult {
 }
 
 interface PendingRequest {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   resolve: (value: any) => void;
   reject: (error: Error) => void;
   timeout: ReturnType<typeof setTimeout>;
@@ -49,7 +50,12 @@ export class YellowPaymentClient {
   private pendingRequests: Map<string, PendingRequest> = new Map();
   private pingInterval: ReturnType<typeof setInterval> | null = null;
   private onBalanceChange?: (userBalance: string, agentBalance: string) => void;
+  private onDisconnect?: () => void;
   private expiresAt: bigint = 0n;
+  private reconnecting: boolean = false;
+  private intentionalDisconnect: boolean = false;
+  private maxReconnectAttempts: number = 3;
+  private reconnectAttempts: number = 0;
 
   async connect(
     userAddress: Address,
@@ -58,6 +64,7 @@ export class YellowPaymentClient {
     sessionSigner: MessageSigner,
     expiresAt: bigint,
     onBalanceChange?: (userBalance: string, agentBalance: string) => void,
+    onDisconnect?: () => void,
   ): Promise<void> {
     this.userAddress = userAddress;
     this.sessionKeyAddress = sessionKeyAddress;
@@ -65,7 +72,14 @@ export class YellowPaymentClient {
     this.sessionSigner = sessionSigner;
     this.expiresAt = expiresAt;
     this.onBalanceChange = onBalanceChange;
+    this.onDisconnect = onDisconnect;
+    this.intentionalDisconnect = false;
+    this.reconnectAttempts = 0;
 
+    return this.connectWs();
+  }
+
+  private connectWs(): Promise<void> {
     return new Promise<void>((resolve, reject) => {
       this.ws = new WebSocket(CLEARNODE_URL);
 
@@ -78,6 +92,7 @@ export class YellowPaymentClient {
         clearTimeout(connectTimeout);
         console.log("[Yellow] WebSocket connected to ClearNode");
         this.connected = true;
+        this.reconnectAttempts = 0;
 
         try {
           await this.authenticate();
@@ -95,7 +110,9 @@ export class YellowPaymentClient {
       this.ws.onerror = (error) => {
         clearTimeout(connectTimeout);
         console.error("[Yellow] WebSocket error:", error);
-        reject(new Error("WebSocket connection failed"));
+        if (!this.reconnecting) {
+          reject(new Error("WebSocket connection failed"));
+        }
       };
 
       this.ws.onclose = () => {
@@ -103,8 +120,38 @@ export class YellowPaymentClient {
         this.connected = false;
         this.authenticated = false;
         this.stopPingLoop();
+
+        if (!this.intentionalDisconnect) {
+          this.attemptReconnect();
+        }
       };
     });
+  }
+
+  private async attemptReconnect(): Promise<void> {
+    if (this.reconnecting || this.intentionalDisconnect) return;
+    if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+      console.error("[Yellow] Max reconnect attempts reached");
+      this.onDisconnect?.();
+      return;
+    }
+
+    this.reconnecting = true;
+    this.reconnectAttempts++;
+    const delay = Math.min(1000 * Math.pow(2, this.reconnectAttempts - 1), 8000);
+    console.log(`[Yellow] Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})...`);
+
+    await new Promise((r) => setTimeout(r, delay));
+
+    try {
+      await this.connectWs();
+      console.log("[Yellow] Reconnected successfully");
+      this.reconnecting = false;
+    } catch (err) {
+      console.error("[Yellow] Reconnect failed:", err);
+      this.reconnecting = false;
+      this.attemptReconnect();
+    }
   }
 
   private async authenticate(): Promise<void> {
@@ -339,6 +386,7 @@ export class YellowPaymentClient {
     }
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private waitForRawResponse(method: string, timeoutMs: number): Promise<any> {
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
@@ -397,6 +445,7 @@ export class YellowPaymentClient {
   }
 
   disconnect(): void {
+    this.intentionalDisconnect = true;
     this.stopPingLoop();
     if (this.ws) {
       this.ws.close();

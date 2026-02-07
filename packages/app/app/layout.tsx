@@ -12,6 +12,13 @@ export const metadata: Metadata = {
   title: "QueryFi | Pay-per-Query DeFi Analytics",
   description:
     "AI-powered DeFi insights for micropayments. Ask anything, pay only for what you use.",
+  icons: {
+    icon: [
+      { url: "/icon-192.png", sizes: "192x192", type: "image/png" },
+      { url: "/icon-512.png", sizes: "512x512", type: "image/png" },
+    ],
+    apple: "/apple-icon.png",
+  },
 };
 
 export default function RootLayout({
