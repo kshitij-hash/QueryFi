@@ -1,6 +1,7 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
+@plugin "@tailwindcss/typography";
 
 @custom-variant dark (&:is(.dark *));
 
@@ -26,6 +27,12 @@
   --color-input: var(--input);
   --color-border: var(--border);
   --color-destructive: var(--destructive);
+  --color-success: var(--success);
+  --color-success-foreground: var(--success-foreground);
+  --color-warning: var(--warning);
+  --color-warning-foreground: var(--warning-foreground);
+  --color-info: var(--info);
+  --color-info-foreground: var(--info-foreground);
   --color-accent-foreground: var(--accent-foreground);
   --color-accent: var(--accent);
   --color-muted-foreground: var(--muted-foreground);
@@ -71,6 +78,12 @@
   --chart-3: oklch(0.59 0.20 277);
   --chart-4: oklch(0.51 0.23 277);
   --chart-5: oklch(0.46 0.21 277);
+  --success: oklch(0.60 0.17 145);
+  --success-foreground: oklch(0.20 0 0);
+  --warning: oklch(0.70 0.15 85);
+  --warning-foreground: oklch(0.20 0 0);
+  --info: oklch(0.60 0.15 250);
+  --info-foreground: oklch(0.20 0 0);
   --radius: 0.875rem;
   --sidebar: oklch(0.985 0 0);
   --sidebar-foreground: oklch(0.141 0.005 285.823);
@@ -114,6 +127,12 @@
   --sidebar-accent-foreground: oklch(0.96 0.02 272);
   --sidebar-border: oklch(1 0 0 / 10%);
   --sidebar-ring: oklch(0.552 0.016 285.938);
+  --success: oklch(0.65 0.17 145);
+  --success-foreground: oklch(0.98 0 0);
+  --warning: oklch(0.75 0.15 85);
+  --warning-foreground: oklch(0.20 0 0);
+  --info: oklch(0.65 0.15 250);
+  --info-foreground: oklch(0.98 0 0);
 }
 
 @layer base {
@@ -123,4 +142,11 @@
   body {
     @apply bg-background text-foreground;
   }
+}
+
+/* Gradient text utility */
+.text-gradient {
+  background: linear-gradient(135deg, oklch(0.68 0.16 277), oklch(0.59 0.20 277));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
 }

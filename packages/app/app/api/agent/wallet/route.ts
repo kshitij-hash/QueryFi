@@ -1,17 +1,48 @@
 import { NextResponse } from "next/server";
-import { getAgentWallet, getAgentBalance } from "@/lib/circle-wallet";
+import { createPublicClient, http, parseAbi } from "viem";
+import { baseSepolia } from "viem/chains";
+import { privateKeyToAccount } from "viem/accounts";
+import type { Hex } from "viem";
+
+const USDC_ADDRESS = "0x036CbD53842c5426634e7929541eC2318f3dCF7e" as const;
 
 export async function GET() {
   try {
-    const [wallet, balances] = await Promise.all([
-      getAgentWallet(),
-      getAgentBalance(),
-    ]);
+    const privateKey = process.env.AGENT_PRIVATE_KEY as Hex | undefined;
+    if (!privateKey) {
+      throw new Error("AGENT_PRIVATE_KEY not configured");
+    }
 
-    const usdcBalance =
-      balances.find((b) => b.token.symbol === "USDC")?.amount ?? "0";
+    const account = privateKeyToAccount(privateKey);
+    const client = createPublicClient({
+      chain: baseSepolia,
+      transport: http(),
+    });
 
-    return NextResponse.json({ wallet, balances, usdcBalance });
+    const usdcRaw = await client.readContract({
+      address: USDC_ADDRESS,
+      abi: parseAbi(["function balanceOf(address) view returns (uint256)"]),
+      functionName: "balanceOf",
+      args: [account.address],
+    });
+
+    const usdcBalance = (Number(usdcRaw) / 1_000_000).toFixed(2);
+
+    return NextResponse.json({
+      wallet: {
+        id: "agent-eoa",
+        address: account.address,
+        blockchain: "BASE-SEPOLIA",
+        state: "LIVE",
+      },
+      balances: [
+        {
+          token: { symbol: "USDC", name: "USD Coin" },
+          amount: usdcBalance,
+        },
+      ],
+      usdcBalance,
+    });
   } catch (error) {
     console.error("Agent wallet API error:", error);
     return NextResponse.json(

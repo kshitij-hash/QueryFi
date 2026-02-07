@@ -29,12 +29,16 @@ contract MicropaymentSettlementHook is BaseHook, ReentrancyGuard {
     error PayerNotAuthorized();
     error PayerAlreadyAuthorized();
     error PayerNotFound();
-
-    // Settlement threshold: 1 USDC (6 decimals)
-    uint256 public constant SETTLEMENT_THRESHOLD = 1e6;
+    error ThresholdTooLow();
 
     // Minimum deposit amount: 0.001 USDC (1000 units with 6 decimals)
     uint256 public constant MIN_DEPOSIT = 1000;
+
+    // Minimum allowed threshold: 0.01 USDC
+    uint256 public constant MIN_THRESHOLD = 10000;
+
+    // Settlement threshold — configurable policy (default 1 USDC)
+    uint256 public settlementThreshold;
 
     // Agent wallet that receives settlements
     address public immutable agentWallet;
@@ -52,12 +56,20 @@ contract MicropaymentSettlementHook is BaseHook, ReentrancyGuard {
     uint256 public totalSwapsTracked;
     mapping(PoolId => uint256) public poolSwapCount;
 
+    // Total settled amount (lifetime counter for on-chain audit trail)
+    uint256 public totalSettled;
+
+    // Number of settlements recorded
+    uint256 public settlementCount;
+
     // Events
     event MicropaymentReceived(address indexed payer, uint256 amount, bytes32 indexed queryId);
     event SettlementExecuted(address indexed agent, uint256 amount);
+    event SettlementRecorded(address indexed agent, uint256 amount, bytes32 indexed queryId, uint256 settlementId);
     event PayerAuthorized(address indexed payer);
     event PayerRevoked(address indexed payer);
     event SwapTracked(PoolId indexed poolId, address indexed sender, uint256 totalSwaps);
+    event ThresholdUpdated(uint256 oldThreshold, uint256 newThreshold);
 
     /// @notice Restricts function access to the agent wallet
     modifier onlyAgent() {
@@ -70,6 +82,7 @@ contract MicropaymentSettlementHook is BaseHook, ReentrancyGuard {
         if (_usdc == address(0)) revert InvalidUsdcAddress();
         agentWallet = _agentWallet;
         usdc = _usdc;
+        settlementThreshold = 1e6; // Default: 1 USDC
 
         // Agent is authorized by default
         authorizedPayers[_agentWallet] = true;
@@ -111,6 +124,24 @@ contract MicropaymentSettlementHook is BaseHook, ReentrancyGuard {
         emit SwapTracked(poolId, sender, totalSwapsTracked);
 
         return (this.afterSwap.selector, 0);
+    }
+
+    // ============ Policy Management ============
+
+    /// @notice Update the settlement threshold (policy-based payout control)
+    /// @param newThreshold New threshold in USDC units (6 decimals)
+    function setSettlementThreshold(uint256 newThreshold) external onlyAgent {
+        if (newThreshold < MIN_THRESHOLD) revert ThresholdTooLow();
+
+        uint256 oldThreshold = settlementThreshold;
+        settlementThreshold = newThreshold;
+
+        emit ThresholdUpdated(oldThreshold, newThreshold);
+
+        // If accumulated balance now exceeds new (lower) threshold, auto-settle
+        if (accumulatedBalance >= newThreshold) {
+            _settle();
+        }
     }
 
     // ============ Micropayment Functions ============
@@ -160,7 +191,7 @@ contract MicropaymentSettlementHook is BaseHook, ReentrancyGuard {
         IERC20(usdc).safeTransferFrom(msg.sender, address(this), amount);
 
         // Auto-settle if threshold reached
-        if (newBalance >= SETTLEMENT_THRESHOLD) {
+        if (newBalance >= settlementThreshold) {
             _settle();
         }
     }
@@ -171,6 +202,31 @@ contract MicropaymentSettlementHook is BaseHook, ReentrancyGuard {
         if (accumulatedBalance > 0) {
             _settle();
         }
+    }
+
+    /// @notice Record an off-chain micropayment settlement and pay the agent from the hook's USDC reserve.
+    /// @dev The agent earns micropayments off-chain via Yellow Network state channels. This function
+    ///      creates an on-chain record and transfers the earned USDC from the hook's pre-funded reserve
+    ///      to the agent wallet, making the earnings reflect on-chain.
+    /// @param amount The amount of USDC settled (6 decimals)
+    /// @param queryId A unique identifier for the settlement batch
+    function recordSettlement(uint256 amount, bytes32 queryId) external nonReentrant {
+        if (msg.sender != agentWallet) revert OnlyAgentCanSettle();
+        if (amount < MIN_DEPOSIT) revert AmountTooSmall();
+
+        // Update counters
+        settlementCount++;
+        totalSettled += amount;
+
+        emit SettlementRecorded(msg.sender, amount, queryId, settlementCount);
+
+        // Transfer earned USDC from hook reserve to agent wallet
+        uint256 hookBalance = IERC20(usdc).balanceOf(address(this));
+        if (hookBalance >= amount) {
+            IERC20(usdc).safeTransfer(agentWallet, amount);
+        }
+        // If hook has insufficient reserve, the on-chain record is still created
+        // but the USDC transfer is skipped (earnings tracked but not yet funded)
     }
 
     /// @notice Get the current accumulated balance

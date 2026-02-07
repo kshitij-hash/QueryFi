@@ -1,24 +1,22 @@
-// Bridge: triggers on-chain depositMicropayment via Circle agent wallet
-// Connects off-chain Yellow Network micropayments to the MicropaymentSettlementHook contract
-// Multi-chain: settles on Base Sepolia (primary) and Arc testnet (when configured)
+// Bridge: records off-chain Yellow Network micropayments on-chain via the MicropaymentSettlementHook
+// Uses recordSettlement() which creates an on-chain audit trail AND transfers USDC from hook reserve
+// Multi-chain: records on Base Sepolia (primary) and Arc testnet (when configured)
 
-import { executeContractCall } from "@/lib/circle-wallet";
 import {
   getAccumulated,
   getPayments,
   shouldSettle,
   resetAfterSettlement,
+  addSettlementToHistory,
+  getSettlementHistory as getPersistedHistory,
 } from "@/lib/settlement-tracker";
 import { createWalletClient, http, parseAbi, type Hex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
-import { arcTestnet } from "viem/chains";
+import { baseSepolia, arcTestnet } from "viem/chains";
 
 // Base Sepolia settlement config
-const SETTLEMENT_HOOK_ADDRESS =
-  process.env.SETTLEMENT_HOOK_ADDRESS ??
-  "0xe0d92A5e1D733517aa8b4b5Cf4A874722b30C040";
-
-const USDC_ADDRESS = "0x036CbD53842c5426634e7929541eC2318f3dCF7e";
+const SETTLEMENT_HOOK_ADDRESS = (process.env.SETTLEMENT_HOOK_ADDRESS ??
+  "0x0cD33a7a876AF045e49a80f07C8c8eaF7A1bc040") as Hex;
 
 // Arc testnet settlement config (multi-chain treasury support)
 const ARC_HOOK_ADDRESS = process.env.ARC_SETTLEMENT_HOOK_ADDRESS as
@@ -36,9 +34,6 @@ interface SettlementResult {
   timestamp: number;
   chains: string[];
 }
-
-// Keep recent settlement history in memory
-const settlementHistory: SettlementResult[] = [];
 
 // Track in-flight settlement to prevent concurrent attempts
 let settlementInProgress = false;
@@ -71,6 +66,23 @@ async function withRetry<T>(
 }
 
 /**
+ * Get a viem wallet client for Base Sepolia using the agent private key.
+ */
+function getBaseSepoliaClient() {
+  const privateKey = process.env.AGENT_PRIVATE_KEY as Hex | undefined;
+  if (!privateKey) {
+    throw new Error("AGENT_PRIVATE_KEY not configured");
+  }
+
+  const account = privateKeyToAccount(privateKey);
+  return createWalletClient({
+    account,
+    chain: baseSepolia,
+    transport: http(),
+  });
+}
+
+/**
  * Settle on Arc testnet by calling depositMicropayment() on the ArcSettlementHook
  * via a direct viem wallet client. Returns the tx hash or null if Arc is not configured.
  */
@@ -80,10 +92,10 @@ async function settleOnArc(
 ): Promise<string | null> {
   if (!ARC_HOOK_ADDRESS) return null;
 
-  const privateKey = process.env.PRIVATE_KEY as Hex | undefined;
+  const privateKey = process.env.AGENT_PRIVATE_KEY as Hex | undefined;
   if (!privateKey) {
     console.warn(
-      "[Settlement] Arc settlement skipped: PRIVATE_KEY not configured"
+      "[Settlement] Arc settlement skipped: AGENT_PRIVATE_KEY not configured"
     );
     return null;
   }
@@ -117,9 +129,9 @@ async function settleOnArc(
 }
 
 /**
- * Triggers on-chain settlement by calling depositMicropayment() on the hook contract
- * via the Circle agent wallet (Base Sepolia) and optionally on Arc testnet.
- * Multi-chain: settles on all configured chains for treasury redundancy.
+ * Triggers on-chain settlement by calling recordSettlement() on the hook contract
+ * via direct viem wallet client (Base Sepolia) and optionally on Arc testnet.
+ * recordSettlement() creates an on-chain audit trail AND transfers USDC from hook reserve.
  * Retries up to 3 times with exponential backoff.
  */
 export async function triggerOnChainSettlement(): Promise<SettlementResult> {
@@ -142,18 +154,27 @@ export async function triggerOnChainSettlement(): Promise<SettlementResult> {
       payments[payments.length - 1]?.queryId ?? "settlement";
     const queryIdBytes32 = stringToBytes32(latestQueryId);
 
-    // Settle on Base Sepolia via Circle wallet
-    const result = await withRetry(
-      () =>
-        executeContractCall(
-          SETTLEMENT_HOOK_ADDRESS,
-          "depositMicropayment(uint256,bytes32)",
-          [accumulated.toString(), queryIdBytes32]
-        ),
-      "depositMicropayment"
+    // Record settlement on Base Sepolia via direct viem call.
+    // recordSettlement() creates an on-chain audit trail (event + counters)
+    // AND transfers USDC from the hook's pre-funded reserve to the agent wallet.
+    const txHash = await withRetry(
+      async () => {
+        const client = getBaseSepoliaClient();
+        return client.writeContract({
+          address: SETTLEMENT_HOOK_ADDRESS,
+          abi: parseAbi([
+            "function recordSettlement(uint256 amount, bytes32 queryId)",
+          ]),
+          functionName: "recordSettlement",
+          args: [BigInt(accumulated), queryIdBytes32 as Hex],
+        });
+      },
+      "recordSettlement"
     );
 
-    // Settle on Arc testnet in parallel (best-effort, non-blocking)
+    console.log(`[Settlement] Base Sepolia tx: ${txHash}`);
+
+    // Record on Arc testnet (best-effort, non-blocking)
     const arcTxHash = await settleOnArc(
       accumulated,
       queryIdBytes32 as Hex
@@ -166,7 +187,7 @@ export async function triggerOnChainSettlement(): Promise<SettlementResult> {
     if (arcTxHash) chains.push("arc-testnet");
 
     const settlementResult: SettlementResult = {
-      transactionId: result.transactionId,
+      transactionId: txHash,
       arcTransactionHash: arcTxHash,
       amount: settled.amount,
       queryIds: settled.payments.map((p) => p.queryId),
@@ -174,10 +195,10 @@ export async function triggerOnChainSettlement(): Promise<SettlementResult> {
       chains,
     };
 
-    settlementHistory.push(settlementResult);
+    addSettlementToHistory(settlementResult);
 
     console.log(
-      `[Settlement] On-chain deposit: ${settled.amount} micro-USDC, chains: ${chains.join(", ")}, base tx: ${result.transactionId}${arcTxHash ? `, arc tx: ${arcTxHash}` : ""}`
+      `[Settlement] Recorded: ${settled.amount} micro-USDC, chains: ${chains.join(", ")}, base tx: ${txHash}${arcTxHash ? `, arc tx: ${arcTxHash}` : ""}`
     );
 
     return settlementResult;
@@ -187,29 +208,27 @@ export async function triggerOnChainSettlement(): Promise<SettlementResult> {
 }
 
 /**
- * Approve the settlement hook contract to spend USDC on behalf of the Circle agent wallet.
- * This is a one-time setup call. Retries on failure.
+ * Call settleNow() on the hook to flush any accumulated balance back to the agent wallet.
  */
-export async function approveHookForUsdc(): Promise<{
+export async function flushHookBalance(): Promise<{
   transactionId: string | null;
 }> {
-  const maxUint256 =
-    "115792089237316195423570985008687907853269984665640564039457584007913129639935";
-
-  const result = await withRetry(
-    () =>
-      executeContractCall(USDC_ADDRESS, "approve(address,uint256)", [
-        SETTLEMENT_HOOK_ADDRESS,
-        maxUint256,
-      ]),
-    "USDC approval"
+  const txHash = await withRetry(
+    async () => {
+      const client = getBaseSepoliaClient();
+      return client.writeContract({
+        address: SETTLEMENT_HOOK_ADDRESS,
+        abi: parseAbi(["function settleNow()"]),
+        functionName: "settleNow",
+        args: [],
+      });
+    },
+    "settleNow"
   );
 
-  console.log(
-    `[Settlement] USDC approval for hook: tx ${result.transactionId}`
-  );
+  console.log(`[Settlement] settleNow called on hook: tx ${txHash}`);
 
-  return { transactionId: result.transactionId };
+  return { transactionId: txHash };
 }
 
 /**
@@ -233,7 +252,7 @@ export async function checkAndAutoSettle(): Promise<SettlementResult | null> {
 }
 
 export function getSettlementHistory(): SettlementResult[] {
-  return [...settlementHistory];
+  return getPersistedHistory();
 }
 
 /** Converts a string to a 0x-prefixed bytes32 hex string */

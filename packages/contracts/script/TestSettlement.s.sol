@@ -12,7 +12,7 @@ import {MicropaymentSettlementHook} from "../src/MicropaymentSettlementHook.sol"
 ///         If the deployer is not authorized, it reports the on-chain state for manual verification.
 contract TestSettlement is Script {
     // Deployed hook
-    address constant HOOK = 0xe0d92A5e1D733517aa8b4b5Cf4A874722b30C040;
+    address constant HOOK = 0x0cD33a7a876AF045e49a80f07C8c8eaF7A1bc040;
 
     // Base Sepolia USDC
     address constant USDC = 0x036CbD53842c5426634e7929541eC2318f3dCF7e;
@@ -27,7 +27,7 @@ contract TestSettlement is Script {
         console.log("Hook address:", HOOK);
         console.log("Agent wallet:", hook.agentWallet());
         console.log("USDC token:", hook.usdc());
-        console.log("Settlement threshold:", hook.SETTLEMENT_THRESHOLD());
+        console.log("Settlement threshold:", hook.settlementThreshold());
         console.log("Min deposit:", hook.MIN_DEPOSIT());
         console.log("Accumulated balance:", hook.accumulatedBalance());
         console.log("Total swaps tracked:", hook.totalSwapsTracked());
@@ -105,7 +105,7 @@ contract TestSettlement is Script {
         console.log("Hook accumulated after:", hookBalanceAfter);
         console.log("Agent USDC after:", agentUsdcAfter);
 
-        if (depositAmount >= hook.SETTLEMENT_THRESHOLD()) {
+        if (depositAmount >= hook.settlementThreshold()) {
             if (hookBalanceAfter == 0 && agentUsdcAfter > agentUsdcBefore) {
                 console.log("RESULT: Auto-settlement SUCCESS");
             } else {

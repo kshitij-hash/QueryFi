@@ -76,7 +76,7 @@ contract MicropaymentSettlementHookTest is Test, Deployers {
     }
 
     function test_constructor_setsThreshold() public view {
-        assertEq(hook.SETTLEMENT_THRESHOLD(), SETTLEMENT_THRESHOLD);
+        assertEq(hook.settlementThreshold(), SETTLEMENT_THRESHOLD);
     }
 
     function test_constructor_authorizesAgentByDefault() public view {
@@ -391,6 +391,101 @@ contract MicropaymentSettlementHookTest is Test, Deployers {
         hook.settleNow();
     }
 
+    // ============ recordSettlement Tests (audit-trail-only, no USDC transfer) ============
+
+    function test_recordSettlement_updatesCounters() public {
+        uint256 amount = 100000; // 0.10 USDC
+        bytes32 queryId = keccak256("settlement_1");
+
+        vm.prank(AGENT_WALLET);
+        hook.recordSettlement(amount, queryId);
+
+        assertEq(hook.totalSettled(), amount);
+        assertEq(hook.settlementCount(), 1);
+    }
+
+    function test_recordSettlement_emitsEvent() public {
+        uint256 amount = 50000;
+        bytes32 queryId = keccak256("settlement_event");
+
+        vm.prank(AGENT_WALLET);
+        vm.expectEmit(true, true, false, true);
+        emit MicropaymentSettlementHook.SettlementRecorded(AGENT_WALLET, amount, queryId, 1);
+        hook.recordSettlement(amount, queryId);
+    }
+
+    function test_recordSettlement_transfersFromReserve() public {
+        uint256 amount = 100000;
+        bytes32 queryId = keccak256("transfer_test");
+
+        // Fund the hook with a USDC reserve
+        usdc.mint(address(hook), 500000);
+
+        uint256 agentBefore = usdc.balanceOf(AGENT_WALLET);
+        uint256 hookBefore = usdc.balanceOf(address(hook));
+
+        vm.prank(AGENT_WALLET);
+        hook.recordSettlement(amount, queryId);
+
+        assertEq(usdc.balanceOf(AGENT_WALLET), agentBefore + amount);
+        assertEq(usdc.balanceOf(address(hook)), hookBefore - amount);
+    }
+
+    function test_recordSettlement_skipsTransferIfNoReserve() public {
+        uint256 amount = 100000;
+        bytes32 queryId = keccak256("no_reserve");
+
+        // No USDC in hook — should still record but not transfer
+        uint256 agentBefore = usdc.balanceOf(AGENT_WALLET);
+
+        vm.prank(AGENT_WALLET);
+        hook.recordSettlement(amount, queryId);
+
+        // Counters still updated
+        assertEq(hook.totalSettled(), amount);
+        assertEq(hook.settlementCount(), 1);
+        // No transfer happened
+        assertEq(usdc.balanceOf(AGENT_WALLET), agentBefore);
+    }
+
+    function test_recordSettlement_doesNotAffectAccumulatedBalance() public {
+        uint256 amount = 100000;
+        bytes32 queryId = keccak256("no_accumulate");
+
+        usdc.mint(address(hook), amount);
+
+        vm.prank(AGENT_WALLET);
+        hook.recordSettlement(amount, queryId);
+
+        assertEq(hook.accumulatedBalance(), 0);
+    }
+
+    function test_recordSettlement_multipleRecords() public {
+        usdc.mint(address(hook), 500000);
+
+        vm.startPrank(AGENT_WALLET);
+        hook.recordSettlement(50000, keccak256("batch_1"));
+        hook.recordSettlement(75000, keccak256("batch_2"));
+        hook.recordSettlement(25000, keccak256("batch_3"));
+        vm.stopPrank();
+
+        assertEq(hook.totalSettled(), 150000);
+        assertEq(hook.settlementCount(), 3);
+        assertEq(usdc.balanceOf(AGENT_WALLET), 150000);
+    }
+
+    function test_recordSettlement_revertsIfNotAgent() public {
+        vm.prank(unauthorized);
+        vm.expectRevert(MicropaymentSettlementHook.OnlyAgentCanSettle.selector);
+        hook.recordSettlement(100000, keccak256("unauth"));
+    }
+
+    function test_recordSettlement_rejectsBelowMinimum() public {
+        vm.prank(AGENT_WALLET);
+        vm.expectRevert(MicropaymentSettlementHook.AmountTooSmall.selector);
+        hook.recordSettlement(MIN_DEPOSIT - 1, keccak256("dust"));
+    }
+
     // ============ getAgentBalance Tests ============
 
     function test_getAgentBalance_returnsAccumulated() public {
@@ -485,6 +580,56 @@ contract MicropaymentSettlementHookTest is Test, Deployers {
 
         swap(poolKey, true, -100, ZERO_BYTES);
     }
+
+    // ============ setSettlementThreshold Tests ============
+
+    function test_setSettlementThreshold_updatesCorrectly() public {
+        vm.prank(AGENT_WALLET);
+        hook.setSettlementThreshold(500000); // 0.50 USDC
+
+        assertEq(hook.settlementThreshold(), 500000);
+    }
+
+    function test_setSettlementThreshold_emitsEvent() public {
+        vm.prank(AGENT_WALLET);
+        vm.expectEmit(false, false, false, true);
+        emit MicropaymentSettlementHook.ThresholdUpdated(SETTLEMENT_THRESHOLD, 500000);
+        hook.setSettlementThreshold(500000);
+    }
+
+    function test_setSettlementThreshold_revertsIfNotAgent() public {
+        vm.prank(unauthorized);
+        vm.expectRevert(MicropaymentSettlementHook.OnlyAgentCanManage.selector);
+        hook.setSettlementThreshold(500000);
+    }
+
+    function test_setSettlementThreshold_revertsIfBelowMinimum() public {
+        vm.prank(AGENT_WALLET);
+        vm.expectRevert(MicropaymentSettlementHook.ThresholdTooLow.selector);
+        hook.setSettlementThreshold(9999); // Below MIN_THRESHOLD (10000)
+    }
+
+    function test_setSettlementThreshold_autoSettlesWhenLowered() public {
+        // Deposit 0.5 USDC (below current 1 USDC threshold)
+        vm.prank(AGENT_WALLET);
+        hook.authorizePayer(address(this));
+
+        usdc.mint(address(this), 500000);
+        usdc.approve(address(hook), 500000);
+        hook.depositMicropayment(500000, keccak256("pre_threshold"));
+
+        assertEq(hook.accumulatedBalance(), 500000);
+        assertEq(usdc.balanceOf(AGENT_WALLET), 0);
+
+        // Lower threshold to 0.25 USDC — should auto-settle the 0.5 USDC
+        vm.prank(AGENT_WALLET);
+        hook.setSettlementThreshold(250000);
+
+        assertEq(hook.accumulatedBalance(), 0);
+        assertEq(usdc.balanceOf(AGENT_WALLET), 500000);
+    }
+
+    // ============ Hook Permissions Tests ============
 
     function test_getHookPermissions_onlyAfterSwap() public view {
         Hooks.Permissions memory perms = hook.getHookPermissions();

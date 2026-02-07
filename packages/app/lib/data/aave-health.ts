@@ -76,8 +76,12 @@ export async function getHealthFactor(
     healthFactor,
   ] = result;
 
+  const rawHealthFactor = parseFloat(formatUnits(healthFactor, 18));
+  // Aave returns uint256.max when there's no debt — clamp to a readable value
+  const clampedHealthFactor = rawHealthFactor > 1e12 ? Infinity : rawHealthFactor;
+
   return {
-    healthFactor: parseFloat(formatUnits(healthFactor, 18)),
+    healthFactor: clampedHealthFactor,
     totalCollateral: parseFloat(formatUnits(totalCollateralBase, 8)),
     totalDebt: parseFloat(formatUnits(totalDebtBase, 8)),
     ltv: Number(ltv) / 100,

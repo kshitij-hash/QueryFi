@@ -15,18 +15,31 @@ interface PaymentRecord {
   timestamp: number;
 }
 
+export interface SettlementRecord {
+  transactionId: string | null;
+  arcTransactionHash: string | null;
+  amount: number;
+  queryIds: string[];
+  timestamp: number;
+  chains: string[];
+}
+
 interface PersistedState {
   accumulatedAmount: number;
   payments: PaymentRecord[];
   lastSettlementTime: number | null;
+  settlementHistory: SettlementRecord[];
 }
 
 function loadState(): PersistedState {
   try {
     const raw = readFileSync(STATE_FILE, "utf-8");
-    return JSON.parse(raw) as PersistedState;
+    const parsed = JSON.parse(raw) as PersistedState;
+    // Ensure settlementHistory exists (backwards compat with old state files)
+    if (!parsed.settlementHistory) parsed.settlementHistory = [];
+    return parsed;
   } catch {
-    return { accumulatedAmount: 0, payments: [], lastSettlementTime: null };
+    return { accumulatedAmount: 0, payments: [], lastSettlementTime: null, settlementHistory: [] };
   }
 }
 
@@ -38,9 +51,8 @@ function saveState(state: PersistedState): void {
   }
 }
 
-const state = loadState();
-
 export function recordPayment(queryId: string, amountMicroUsdc: number) {
+  const state = loadState();
   state.accumulatedAmount += amountMicroUsdc;
   state.payments.push({
     queryId,
@@ -51,19 +63,19 @@ export function recordPayment(queryId: string, amountMicroUsdc: number) {
 }
 
 export function getAccumulated(): number {
-  return state.accumulatedAmount;
+  return loadState().accumulatedAmount;
 }
 
 export function getPayments(): PaymentRecord[] {
-  return [...state.payments];
+  return [...loadState().payments];
 }
 
 export function getLastSettlementTime(): number | null {
-  return state.lastSettlementTime;
+  return loadState().lastSettlementTime;
 }
 
 export function shouldSettle(): boolean {
-  return state.accumulatedAmount >= SETTLEMENT_THRESHOLD;
+  return loadState().accumulatedAmount >= SETTLEMENT_THRESHOLD;
 }
 
 export function getThreshold(): number {
@@ -75,6 +87,7 @@ export function resetAfterSettlement(): {
   amount: number;
   payments: PaymentRecord[];
 } {
+  const state = loadState();
   const settled = {
     amount: state.accumulatedAmount,
     payments: [...state.payments],
@@ -84,4 +97,16 @@ export function resetAfterSettlement(): {
   state.lastSettlementTime = Date.now();
   saveState(state);
   return settled;
+}
+
+/** Add a completed settlement to the persisted history */
+export function addSettlementToHistory(record: SettlementRecord): void {
+  const state = loadState();
+  state.settlementHistory.push(record);
+  saveState(state);
+}
+
+/** Get persisted settlement history */
+export function getSettlementHistory(): SettlementRecord[] {
+  return [...loadState().settlementHistory];
 }

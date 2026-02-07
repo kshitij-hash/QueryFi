@@ -20,8 +20,8 @@ contract DeployHook is Script {
     // Base Sepolia USDC
     address constant USDC = 0x036CbD53842c5426634e7929541eC2318f3dCF7e;
 
-    // Circle Agent Wallet on Base Sepolia
-    address constant AGENT_WALLET = 0x7dF4f69D82fb5594481eC99ec34479034fF26D9D;
+    // Agent Wallet on Base Sepolia (direct key for reliable on-chain settlement)
+    address constant AGENT_WALLET = 0x0E5C53F6838A0333895E4cFe48f721Bea806D266;
 
     function run() public {
         uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY");
@@ -54,6 +54,6 @@ contract DeployHook is Script {
         console.log("Hook deployed at:", address(hook));
         console.log("Agent wallet:", hook.agentWallet());
         console.log("USDC address:", hook.usdc());
-        console.log("Settlement threshold:", hook.SETTLEMENT_THRESHOLD());
+        console.log("Settlement threshold:", hook.settlementThreshold());
     }
 }

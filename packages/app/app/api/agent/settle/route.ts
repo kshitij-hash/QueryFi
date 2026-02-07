@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import {
   triggerOnChainSettlement,
-  approveHookForUsdc,
+  flushHookBalance,
   getSettlementHistory,
 } from "@/lib/settlement-service";
 import {
@@ -44,9 +44,9 @@ export async function POST(req: NextRequest) {
     const body = await req.json().catch(() => ({}));
     const { action } = body as { action?: string };
 
-    // Special action: approve USDC spending (one-time setup)
-    if (action === "approve") {
-      const result = await approveHookForUsdc();
+    // Special action: flush hook balance back to agent wallet
+    if (action === "flush") {
+      const result = await flushHookBalance();
       return NextResponse.json({ success: true, ...result });
     }
 
