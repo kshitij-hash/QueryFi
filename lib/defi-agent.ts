@@ -8,6 +8,8 @@ const MODEL = "google/gemini-2.5-flash";
 
 const SYSTEM_PROMPT = `You are a DeFi analytics assistant. You help users find yield opportunities, check lending position health, calculate impermanent loss, and look up token prices.
 
+You also have your own on-chain wallet on Base Sepolia. You can check your wallet balance and withdraw USDC earnings to the treasury address. Use the check_agent_wallet and withdraw_to_treasury tools when users ask about your wallet or request withdrawals.
+
 Guidelines:
 - Use the available tools to fetch live data before answering
 - Format responses in concise markdown
@@ -105,6 +107,38 @@ const tools = [
       },
     },
   },
+  {
+    type: "function" as const,
+    function: {
+      name: "check_agent_wallet",
+      description:
+        "Check the AI agent's own on-chain wallet address, balances, and status on Base Sepolia.",
+      parameters: {
+        type: "object",
+        properties: {},
+        required: [],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "withdraw_to_treasury",
+      description:
+        "Withdraw USDC from the agent's wallet to the treasury address on Base Sepolia.",
+      parameters: {
+        type: "object",
+        properties: {
+          amount: {
+            type: "string",
+            description:
+              'Amount of USDC to withdraw as a human-readable string (e.g. "1.50")',
+          },
+        },
+        required: ["amount"],
+      },
+    },
+  },
 ];
 
 async function executeTool(
@@ -134,6 +168,23 @@ async function executeTool(
         args.current_price as number
       );
       return JSON.stringify(result, null, 2);
+    }
+    case "check_agent_wallet": {
+      const { getAgentWallet, getAgentBalance } = await import(
+        "@/lib/circle-wallet"
+      );
+      const [wallet, balances] = await Promise.all([
+        getAgentWallet(),
+        getAgentBalance(),
+      ]);
+      const usdcBalance =
+        balances.find((b: { token: { symbol: string } }) => b.token.symbol === "USDC")?.amount ?? "0";
+      return JSON.stringify({ wallet, balances, usdcBalance }, null, 2);
+    }
+    case "withdraw_to_treasury": {
+      const { withdrawToTreasury } = await import("@/lib/circle-wallet");
+      const txResult = await withdrawToTreasury(args.amount as string);
+      return JSON.stringify(txResult, null, 2);
     }
     default:
       return JSON.stringify({ error: `Unknown tool: ${name}` });

@@ -3,6 +3,7 @@
 import { ConnectButton } from "@rainbow-me/rainbowkit";
 import { useAccount } from "wagmi";
 import { DeFiChat } from "@/components/defi-chat";
+import { AgentTreasury } from "@/components/agent-treasury";
 
 const PRICING_ITEMS = [
   { query: "Basic Question", price: "$0.01" },
@@ -56,6 +57,8 @@ export default function Home() {
               </div>
             ))}
           </div>
+
+          <AgentTreasury />
         </div>
       </main>
     </div>
