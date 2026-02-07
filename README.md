@@ -37,18 +37,19 @@ graph TB
 
     subgraph "AI Agent"
         D -->|Authorized query| E[Gemini 2.5 Flash via OpenRouter]
-        E -->|Function calling| F[DeFi Llama - Yields]
-        E -->|Function calling| G[The Graph - Aave Positions]
-        E -->|Function calling| H[Alchemy - Token Prices]
+        E -->|Function calling| F[DeFi Llama - Yields & Prices]
+        E -->|Function calling| G[Aave V3 - Health Factors]
+        E -->|Function calling| H[Uniswap v4 - Pool State & Swap Activity]
+        E -->|Function calling| H2[Settlement Policy Adjustment]
         E -->|Response| B
     end
 
     subgraph "Multi-Chain Settlement"
-        D -->|Accumulate payments| I[Settlement Tracker]
+        D -->|Accumulate payments| I[Settlement Tracker - Neon Postgres]
         I -->|Threshold reached: 1 USDC| J[Settlement Service]
 
         subgraph "Base Sepolia"
-            J -->|Circle Wallet executeContractCall| K[Uniswap v4 Hook]
+            J -->|Agent wallet recordSettlement| K[Uniswap v4 Hook]
             K -->|Auto-settle to agent| L[Agent Treasury USDC]
             K -->|afterSwap tracking| M[Pool Swap Counter]
         end
@@ -65,10 +66,10 @@ graph TB
 
 1. User connects wallet, deposits USDC into a Yellow Network state channel
 2. Each query deducts an off-chain micropayment (no gas)
-3. AI agent (Gemini 2.5 Flash) processes the query with function calling — pulls live data from DeFi Llama, The Graph, Alchemy
-4. Micropayments accumulate locally until the $1 threshold
+3. AI agent (Gemini 2.5 Flash) processes the query with 8 tools — DeFi Llama (yields/prices), Aave V3 (health factors), Uniswap v4 pool state, hook swap activity, settlement policy adjustment, IL calculator, agent wallet
+4. Micropayments accumulate in Neon Postgres until the $1 threshold
 5. Settlement fires on both chains in parallel:
-   - **Base Sepolia**: Circle wallet calls `depositMicropayment()` on the v4 hook
+   - **Base Sepolia**: Agent wallet calls `recordSettlement()` on the v4 hook — creates on-chain audit trail + transfers USDC
    - **Arc testnet**: Direct viem call to `ArcSettlementHook`
 6. Hooks auto-settle accumulated USDC to the agent treasury
 
@@ -86,11 +87,13 @@ graph TB
 
 Accumulates micropayments via `depositMicropayment(uint256, bytes32)`. Auto-settles to the agent wallet at the 1 USDC threshold. The `afterSwap` hook tracks swap count per pool. Deployed via HookMiner CREATE2 to get the right flag bits in the address. 38 Foundry tests including fuzz tests.
 
+The AI agent has direct read access to the v4 pool via `PoolManager.extsload()` — it can report live sqrtPriceX96, tick, and liquidity. It also monitors hook swap activity and can autonomously adjust the settlement threshold on-chain via `setSettlementThreshold()`.
+
 ### Circle/Arc — Track B: Global Payouts & Treasury
 
 `@circle-fin/developer-controlled-wallets` v10.1.0 — SCA wallet on Base Sepolia.
 
-The agent's treasury is a Circle Programmable Wallet. It receives USDC settlements from the hook and can withdraw to an external address. The agent calls `executeContractCall()` to interact with the hook — no private key exposure. Settlement runs on both Base Sepolia (via Circle) and Arc testnet (via direct viem calls) in parallel.
+The agent's treasury is a Circle Programmable Wallet. It receives USDC settlements from the hook and can withdraw to an external address. The contract interaction API (`executeContractCall()`) provides a secure allowlist for hook calls. Settlement runs on both Base Sepolia and Arc testnet (via direct viem calls) in parallel.
 
 The `ArcSettlementHook` on Arc adds configurable thresholds via `setSettlementThreshold()` — the agent can adjust payout policy dynamically. 48 Foundry tests.
 
@@ -123,8 +126,9 @@ The `ArcSettlementHook` on Arc adds configurable thresholds via `setSettlementTh
 | Frontend | Next.js 16, React 19, RainbowKit, shadcn/ui, Tailwind |
 | Micropayments | Yellow Network Nitrolite SDK (`@erc7824/nitrolite`) |
 | AI | Gemini 2.5 Flash via OpenRouter (function calling) |
-| Data | DeFi Llama (yields), The Graph (Aave V3), Alchemy (token prices) |
+| Data | DeFi Llama (yields + prices), Aave V3 (direct RPC), Uniswap v4 (extsload) |
 | Settlement | Uniswap v4 BaseHook + ArcSettlementHook, Solidity 0.8.26 |
+| Database | Neon Postgres + Drizzle ORM (serverless-safe persistence) |
 | Agent Wallet | Circle Programmable Wallets (SCA) |
 | Tests | Foundry — 86 tests (38 Base + 48 Arc), including fuzz |
 
@@ -135,7 +139,8 @@ git clone https://github.com/kshitij-hash/QueryFi.git
 cd queryfi
 pnpm install
 cp packages/app/.env.example packages/app/.env.local
-# fill in API keys
+# fill in API keys + DATABASE_URL (Neon connection string)
+pnpm --filter @queryfi/app drizzle-kit push   # create tables
 pnpm dev
 ```
 
@@ -148,7 +153,7 @@ forge build
 forge test -vvv
 ```
 
-See `packages/app/.env.example` for all required variables. You'll need keys from [WalletConnect](https://cloud.walletconnect.com), [OpenRouter](https://openrouter.ai/keys), and [Circle Console](https://console.circle.com).
+See `packages/app/.env.example` for all required variables. You'll need keys from [WalletConnect](https://cloud.walletconnect.com), [OpenRouter](https://openrouter.ai/keys), [Circle Console](https://console.circle.com), and a [Neon](https://console.neon.tech) database.
 
 ## Project Structure
 
@@ -162,9 +167,11 @@ queryfi/
 │   │   ├── components/
 │   │   │   ├── defi-chat.tsx       # Chat UI with Yellow payments
 │   │   │   └── agent-treasury.tsx  # Treasury dashboard
+│   │   ├── drizzle.config.ts       # Drizzle Kit config
 │   │   └── lib/
+│   │       ├── db/                  # Neon Postgres + Drizzle schema
 │   │       ├── yellow-client.ts    # Yellow Network client (466 lines)
-│   │       ├── defi-agent.ts       # AI agent with 6 tools
+│   │       ├── defi-agent.ts       # AI agent with 8 tools
 │   │       ├── circle-wallet.ts    # Circle SDK integration
 │   │       ├── settlement-service.ts
 │   │       └── settlement-tracker.ts
