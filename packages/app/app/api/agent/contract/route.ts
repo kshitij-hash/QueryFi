@@ -1,13 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 import { executeContractCall } from "@/lib/circle-wallet";
 
+const BASE_HOOK = (
+  process.env.SETTLEMENT_HOOK_ADDRESS ?? "0x974E39C679dd172eC68568cBa6f62CdF4BFeC040"
+).toLowerCase();
+
+const ARC_HOOK = process.env.ARC_SETTLEMENT_HOOK_ADDRESS?.toLowerCase();
+
 const ALLOWED_CONTRACTS = new Set(
-  [
-    process.env.SETTLEMENT_HOOK_ADDRESS ?? "0x0cD33a7a876AF045e49a80f07C8c8eaF7A1bc040",
-    process.env.ARC_SETTLEMENT_HOOK_ADDRESS,
-  ]
-    .filter(Boolean)
-    .map((a) => a!.toLowerCase())
+  [BASE_HOOK, ARC_HOOK].filter(Boolean) as string[]
 );
 
 const ALLOWED_FUNCTIONS = new Set([
@@ -43,10 +44,17 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    // Use Arc Circle wallet for Arc hook contracts, Base wallet for everything else
+    const isArcContract = ARC_HOOK && contractAddress.toLowerCase() === ARC_HOOK;
+    const walletId = isArcContract
+      ? process.env.ARC_CIRCLE_WALLET_ID
+      : undefined;
+
     const result = await executeContractCall(
       contractAddress,
       abiFunctionSignature,
-      abiParameters ?? []
+      abiParameters ?? [],
+      walletId
     );
 
     return NextResponse.json({ success: true, transaction: result });

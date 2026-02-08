@@ -101,9 +101,10 @@ export async function withdrawToTreasury(amount: string) {
 export async function executeContractCall(
   contractAddress: string,
   abiFunctionSignature: string,
-  abiParameters: string[]
+  abiParameters: string[],
+  walletIdOverride?: string
 ) {
-  const walletId = process.env.CIRCLE_WALLET_ID;
+  const walletId = walletIdOverride ?? process.env.CIRCLE_WALLET_ID;
   if (!walletId) {
     throw new Error("Missing CIRCLE_WALLET_ID environment variable");
   }

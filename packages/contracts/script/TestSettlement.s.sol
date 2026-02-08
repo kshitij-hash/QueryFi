@@ -12,7 +12,7 @@ import {MicropaymentSettlementHook} from "../src/MicropaymentSettlementHook.sol"
 ///         If the deployer is not authorized, it reports the on-chain state for manual verification.
 contract TestSettlement is Script {
     // Deployed hook
-    address constant HOOK = 0x0cD33a7a876AF045e49a80f07C8c8eaF7A1bc040;
+    address constant HOOK = 0x974E39C679dd172eC68568cBa6f62CdF4BFeC040;
 
     // Base Sepolia USDC
     address constant USDC = 0x036CbD53842c5426634e7929541eC2318f3dCF7e;

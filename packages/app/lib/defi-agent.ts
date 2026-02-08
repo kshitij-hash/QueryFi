@@ -25,6 +25,8 @@ When adjusting settlement policy:
 - Low activity → consider raising threshold to batch settlements and save gas
 - Always provide a clear reason for threshold changes
 
+When the get_swap_activity tool returns a recommendation field, proactively share it with the user and suggest they adjust the threshold accordingly using adjust_settlement_policy.
+
 Guidelines:
 - Use the available tools to fetch live data when the query requires it
 - For general DeFi knowledge questions (e.g. "what is a flash loan?", "how does staking work?"), answer directly from your knowledge without using tools
@@ -154,7 +156,7 @@ const tools = [
     function: {
       name: "get_swap_activity",
       description:
-        "Get swap activity and settlement stats from the MicropaymentSettlementHook on Base Sepolia. Returns total swaps tracked, accumulated balance, settlement threshold, total settled, and settlement count.",
+        "Get swap activity and settlement stats from the MicropaymentSettlementHook on Base Sepolia. Returns total swaps tracked, accumulated balance, settlement threshold, total settled, settlement count, and a volume-based threshold recommendation when applicable.",
       parameters: {
         type: "object",
         properties: {},
@@ -220,21 +222,13 @@ async function executeTool(
       return JSON.stringify(result, null, 2);
     }
     case "check_agent_wallet": {
-      const { createPublicClient, http, parseAbi } = await import("viem");
-      const { baseSepolia } = await import("viem/chains");
-      const { privateKeyToAccount } = await import("viem/accounts");
-      const pk = process.env.AGENT_PRIVATE_KEY as `0x${string}`;
-      const account = privateKeyToAccount(pk);
-      const client = createPublicClient({ chain: baseSepolia, transport: http() });
-      const usdcRaw = await client.readContract({
-        address: "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
-        abi: parseAbi(["function balanceOf(address) view returns (uint256)"]),
-        functionName: "balanceOf",
-        args: [account.address],
-      });
-      const usdcBalance = (Number(usdcRaw) / 1_000_000).toFixed(2);
+      const { getAgentWallet, getAgentBalance } = await import("@/lib/circle-wallet");
+      const wallet = await getAgentWallet();
+      const balances = await getAgentBalance();
+      const usdcEntry = balances.find((b) => b.token.symbol === "USDC");
+      const usdcBalance = usdcEntry?.amount ?? "0.00";
       return JSON.stringify({
-        wallet: { address: account.address, blockchain: "BASE-SEPOLIA", state: "LIVE" },
+        wallet: { address: wallet.address, blockchain: wallet.blockchain, state: wallet.state },
         usdcBalance,
       }, null, 2);
     }
@@ -245,7 +239,7 @@ async function executeTool(
       const POOL_MANAGER = "0x05E73354cFDd6745C338b50BcFDfA3Aa6fA03408";
       const USDC_ADDR = "0x036CbD53842c5426634e7929541eC2318f3dCF7e";
       const WETH_ADDR = "0x4200000000000000000000000000000000000006";
-      const hookAddress = process.env.SETTLEMENT_HOOK_ADDRESS ?? "0x0cD33a7a876AF045e49a80f07C8c8eaF7A1bc040";
+      const hookAddress = process.env.SETTLEMENT_HOOK_ADDRESS ?? "0x974E39C679dd172eC68568cBa6f62CdF4BFeC040";
 
       const client = createPublicClient({ chain: baseSepolia, transport: http() });
 
@@ -334,7 +328,7 @@ async function executeTool(
       const { baseSepolia } = await import("viem/chains");
 
       const hookAddress = (process.env.SETTLEMENT_HOOK_ADDRESS ??
-        "0x0cD33a7a876AF045e49a80f07C8c8eaF7A1bc040") as `0x${string}`;
+        "0x974E39C679dd172eC68568cBa6f62CdF4BFeC040") as `0x${string}`;
 
       const client = createPublicClient({ chain: baseSepolia, transport: http() });
 
@@ -354,14 +348,26 @@ async function executeTool(
         client.readContract({ address: hookAddress, abi: hookAbi, functionName: "settlementCount" }),
       ]);
 
+      const swapCount = Number(totalSwaps);
+      const thresholdNum = Number(threshold) / 1_000_000;
       const accUsdc = (Number(accumulated) / 1_000_000).toFixed(4);
-      const threshUsdc = (Number(threshold) / 1_000_000).toFixed(4);
+      const threshUsdc = thresholdNum.toFixed(4);
       const settledUsdc = (Number(totalSettled) / 1_000_000).toFixed(4);
       const readyToSettle = Number(accumulated) >= Number(threshold);
 
+      // Volume-aware threshold recommendation
+      let recommendation: string | null = null;
+      if (swapCount >= 20 && thresholdNum > 0.25) {
+        recommendation = `High activity (${swapCount} swaps). Consider lowering threshold to $0.25 for faster payouts.`;
+      } else if (swapCount >= 10 && thresholdNum > 0.50) {
+        recommendation = `Moderate activity (${swapCount} swaps). Consider lowering threshold to $0.50 to balance speed and gas costs.`;
+      } else if (swapCount <= 2 && thresholdNum < 1.00) {
+        recommendation = `Low activity (${swapCount} swaps). Consider raising threshold to $1.00 to batch settlements and save gas.`;
+      }
+
       return JSON.stringify({
         hookAddress,
-        totalSwapsTracked: Number(totalSwaps),
+        totalSwapsTracked: swapCount,
         accumulatedBalance: accUsdc,
         accumulatedBalanceRaw: accumulated.toString(),
         settlementThreshold: threshUsdc,
@@ -369,16 +375,15 @@ async function executeTool(
         totalSettled: settledUsdc,
         settlementCount: Number(settlementCt),
         readyToSettle,
-        analysis: `Hook has tracked ${totalSwaps} swaps. Accumulated: $${accUsdc} USDC (threshold: $${threshUsdc}). ${Number(settlementCt)} settlements completed totaling $${settledUsdc} USDC.${readyToSettle ? " Ready to settle now!" : ""}`,
+        recommendation,
+        analysis: `Hook has tracked ${totalSwaps} swaps. Accumulated: $${accUsdc} USDC (threshold: $${threshUsdc}). ${Number(settlementCt)} settlements completed totaling $${settledUsdc} USDC.${readyToSettle ? " Ready to settle now!" : ""}${recommendation ? ` Recommendation: ${recommendation}` : ""}`,
       }, null, 2);
     }
     case "adjust_settlement_policy": {
-      const { createPublicClient, createWalletClient, http, parseAbi } = await import("viem");
+      const { createPublicClient, http, parseAbi } = await import("viem");
       const { baseSepolia } = await import("viem/chains");
-      const { privateKeyToAccount } = await import("viem/accounts");
-
       const hookAddress = (process.env.SETTLEMENT_HOOK_ADDRESS ??
-        "0x0cD33a7a876AF045e49a80f07C8c8eaF7A1bc040") as `0x${string}`;
+        "0x974E39C679dd172eC68568cBa6f62CdF4BFeC040") as `0x${string}`;
 
       const newThresholdUsdc = args.new_threshold_usdc as number;
       const reason = (args.reason as string) || "User-requested threshold adjustment";
@@ -391,14 +396,10 @@ async function executeTool(
         return JSON.stringify({ error: "Threshold too low. Minimum is $0.01 USDC (10000 raw units)." });
       }
 
-      const agentPk = process.env.AGENT_PRIVATE_KEY as `0x${string}`;
-      const account = privateKeyToAccount(agentPk);
-
       // Read current threshold first
       const publicClient = createPublicClient({ chain: baseSepolia, transport: http() });
       const hookAbi = parseAbi([
         "function settlementThreshold() view returns (uint256)",
-        "function setSettlementThreshold(uint256 newThreshold)",
       ]);
       const oldThresholdRaw = await publicClient.readContract({
         address: hookAddress,
@@ -407,27 +408,21 @@ async function executeTool(
       });
       const oldThresholdUsdc = (Number(oldThresholdRaw) / 1_000_000).toFixed(4);
 
-      // Send the transaction
-      const walletClient = createWalletClient({
-        account,
-        chain: baseSepolia,
-        transport: http(),
-      });
-
-      const txHash = await walletClient.writeContract({
-        address: hookAddress,
-        abi: hookAbi,
-        functionName: "setSettlementThreshold",
-        args: [newThresholdRaw],
-      });
+      // Send the transaction via Circle SCA wallet (which is the hook's agentWallet)
+      const { executeContractCall } = await import("@/lib/circle-wallet");
+      const circleResult = await executeContractCall(
+        hookAddress,
+        "setSettlementThreshold(uint256)",
+        [newThresholdRaw.toString()]
+      );
 
       return JSON.stringify({
         success: true,
-        transactionHash: txHash,
+        transactionId: circleResult.transactionId,
         oldThreshold: `$${oldThresholdUsdc} USDC`,
         newThreshold: `$${newThresholdUsdc.toFixed(4)} USDC`,
         reason,
-        analysis: `Settlement threshold updated from $${oldThresholdUsdc} to $${newThresholdUsdc.toFixed(4)} USDC. Reason: ${reason}. Tx: ${txHash}`,
+        analysis: `Settlement threshold updated from $${oldThresholdUsdc} to $${newThresholdUsdc.toFixed(4)} USDC. Reason: ${reason}. Circle tx: ${circleResult.transactionId}`,
       }, null, 2);
     }
     default:
@@ -476,11 +471,24 @@ async function callOpenRouter(messages: ChatMessage[]) {
   return res.json();
 }
 
-export async function runDefiAgent(query: string): Promise<string> {
+export interface ConversationMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+
+export async function runDefiAgent(query: string, history?: ConversationMessage[]): Promise<string> {
   const messages: ChatMessage[] = [
     { role: "system", content: SYSTEM_PROMPT },
-    { role: "user", content: query },
   ];
+
+  // Inject recent conversation history for context
+  if (history && history.length > 0) {
+    for (const msg of history.slice(-10)) {
+      messages.push({ role: msg.role, content: msg.content });
+    }
+  }
+
+  messages.push({ role: "user", content: query });
 
   const MAX_ITERATIONS = 5;
 

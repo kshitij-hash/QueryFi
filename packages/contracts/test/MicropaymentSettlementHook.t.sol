@@ -335,6 +335,74 @@ contract MicropaymentSettlementHookTest is Test, Deployers {
         assertEq(usdc.balanceOf(AGENT_WALLET), 1100000);
     }
 
+    // ============ _settle() Counter Tests ============
+
+    function test_depositMicropayment_autoSettleUpdatesCounters() public {
+        vm.prank(AGENT_WALLET);
+        hook.authorizePayer(address(this));
+
+        usdc.mint(address(this), SETTLEMENT_THRESHOLD);
+        usdc.approve(address(hook), SETTLEMENT_THRESHOLD);
+        hook.depositMicropayment(SETTLEMENT_THRESHOLD, keccak256("counter_auto"));
+
+        assertEq(hook.settlementCount(), 1);
+        assertEq(hook.totalSettled(), SETTLEMENT_THRESHOLD);
+    }
+
+    function test_settleNow_updatesCounters() public {
+        vm.prank(AGENT_WALLET);
+        hook.authorizePayer(address(this));
+
+        uint256 amount = 500000; // 0.5 USDC
+        usdc.mint(address(this), amount);
+        usdc.approve(address(hook), amount);
+        hook.depositMicropayment(amount, keccak256("counter_manual"));
+
+        vm.prank(AGENT_WALLET);
+        hook.settleNow();
+
+        assertEq(hook.settlementCount(), 1);
+        assertEq(hook.totalSettled(), amount);
+    }
+
+    function test_multipleAutoSettlements_incrementCounters() public {
+        vm.prank(AGENT_WALLET);
+        hook.authorizePayer(address(this));
+
+        // First auto-settle
+        usdc.mint(address(this), SETTLEMENT_THRESHOLD);
+        usdc.approve(address(hook), SETTLEMENT_THRESHOLD);
+        hook.depositMicropayment(SETTLEMENT_THRESHOLD, keccak256("multi_1"));
+
+        // Second auto-settle
+        usdc.mint(address(this), SETTLEMENT_THRESHOLD);
+        usdc.approve(address(hook), SETTLEMENT_THRESHOLD);
+        hook.depositMicropayment(SETTLEMENT_THRESHOLD, keccak256("multi_2"));
+
+        assertEq(hook.settlementCount(), 2);
+        assertEq(hook.totalSettled(), SETTLEMENT_THRESHOLD * 2);
+    }
+
+    function test_setSettlementThreshold_autoSettleUpdatesCounters() public {
+        vm.prank(AGENT_WALLET);
+        hook.authorizePayer(address(this));
+
+        // Deposit 0.5 USDC (below 1 USDC threshold)
+        usdc.mint(address(this), 500000);
+        usdc.approve(address(hook), 500000);
+        hook.depositMicropayment(500000, keccak256("thresh_counter"));
+
+        assertEq(hook.settlementCount(), 0);
+        assertEq(hook.totalSettled(), 0);
+
+        // Lower threshold to 0.25 USDC — triggers auto-settle
+        vm.prank(AGENT_WALLET);
+        hook.setSettlementThreshold(250000);
+
+        assertEq(hook.settlementCount(), 1);
+        assertEq(hook.totalSettled(), 500000);
+    }
+
     // ============ Manual Settlement Tests ============
 
     function test_settleNow_transfersToAgent() public {

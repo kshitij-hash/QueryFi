@@ -90,7 +90,6 @@ export class YellowPaymentClient {
 
       this.ws.onopen = async () => {
         clearTimeout(connectTimeout);
-        console.log("[Yellow] WebSocket connected to ClearNode");
         this.connected = true;
         this.reconnectAttempts = 0;
 
@@ -109,14 +108,12 @@ export class YellowPaymentClient {
 
       this.ws.onerror = (error) => {
         clearTimeout(connectTimeout);
-        console.error("[Yellow] WebSocket error:", error);
         if (!this.reconnecting) {
           reject(new Error("WebSocket connection failed"));
         }
       };
 
       this.ws.onclose = () => {
-        console.log("[Yellow] WebSocket disconnected");
         this.connected = false;
         this.authenticated = false;
         this.stopPingLoop();
@@ -131,7 +128,6 @@ export class YellowPaymentClient {
   private async attemptReconnect(): Promise<void> {
     if (this.reconnecting || this.intentionalDisconnect) return;
     if (this.reconnectAttempts >= this.maxReconnectAttempts) {
-      console.error("[Yellow] Max reconnect attempts reached");
       this.onDisconnect?.();
       return;
     }
@@ -139,16 +135,12 @@ export class YellowPaymentClient {
     this.reconnecting = true;
     this.reconnectAttempts++;
     const delay = Math.min(1000 * Math.pow(2, this.reconnectAttempts - 1), 8000);
-    console.log(`[Yellow] Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})...`);
-
     await new Promise((r) => setTimeout(r, delay));
 
     try {
       await this.connectWs();
-      console.log("[Yellow] Reconnected successfully");
       this.reconnecting = false;
-    } catch (err) {
-      console.error("[Yellow] Reconnect failed:", err);
+    } catch {
       this.reconnecting = false;
       this.attemptReconnect();
     }
@@ -172,7 +164,6 @@ export class YellowPaymentClient {
 
     const rawResponse = await challengePromise;
     const challenge = rawResponse.res[2].challenge_message;
-    console.log("[Yellow] Got challenge, requesting wallet signature...");
 
     const verifyPromise = this.waitForRawResponse("auth_verify", 30000);
 
@@ -189,7 +180,6 @@ export class YellowPaymentClient {
     }
 
     this.authenticated = true;
-    console.log("[Yellow] Authenticated successfully");
   }
 
   async createPaymentSession(
@@ -235,8 +225,6 @@ export class YellowPaymentClient {
 
     this.appSessionId = response.res[2].app_session_id;
     this.stateVersion = response.res[2].version ?? 0;
-    console.log("[Yellow] App session created:", this.appSessionId);
-
     return this.appSessionId!;
   }
 
@@ -287,10 +275,6 @@ export class YellowPaymentClient {
     this.agentBalance = newAgentBalance;
     this.stateVersion = response.res[2].version ?? this.stateVersion + 1;
 
-    console.log(
-      `[Yellow] Payment: $${(Number(amount) / 1_000_000).toFixed(2)} for query ${queryId}`,
-    );
-
     this.onBalanceChange?.(
       this.userBalance.toString(),
       this.agentBalance.toString(),
@@ -327,7 +311,6 @@ export class YellowPaymentClient {
     const closePromise = this.waitForRawResponse("close_app_session", 30000);
     this.ws.send(closeMsg);
     await closePromise;
-    console.log("[Yellow] Session closed, settlement initiated");
     this.appSessionId = null;
   }
 
@@ -355,7 +338,6 @@ export class YellowPaymentClient {
 
         if (method === "error" && this.pendingRequests.size > 0) {
           const errorMsg = parsed.res[2]?.error || "Unknown error";
-          console.error("[Yellow] Error while request pending:", errorMsg);
           const [key, firstPending] = this.pendingRequests.entries().next()
             .value as [string, PendingRequest];
           clearTimeout(firstPending.timeout);
@@ -366,23 +348,19 @@ export class YellowPaymentClient {
 
         switch (method) {
           case "bu":
-            console.log("[Yellow] Balance update received");
+          case "assets":
+          case "asu":
+          case "pong":
             break;
           case "ping":
             this.sendPong();
             break;
-          case "assets":
-            console.log("[Yellow] Assets list received");
-            break;
-          case "error":
-            console.error("[Yellow] Error:", parsed.res[2]?.error);
-            break;
           default:
-            console.log("[Yellow] Unhandled message:", method);
+            break;
         }
       }
-    } catch (error) {
-      console.error("[Yellow] Failed to parse message:", error);
+    } catch {
+      // Ignore unparseable messages
     }
   }
 

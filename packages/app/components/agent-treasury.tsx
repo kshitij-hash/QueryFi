@@ -103,9 +103,9 @@ export function AgentTreasury() {
       if (!res.ok) throw new Error(json.error || "Settlement failed");
       const txId = json.settlement.transactionId;
       const txShort = txId ? truncateAddress(txId) : "pending";
-      setSettleResult(
-        `Settlement submitted: $${json.settlement.amountUsdc} USDC (tx: ${txShort})`
-      );
+      const resultMsg = `Settlement submitted: $${json.settlement.amountUsdc} USDC (tx: ${txShort})`;
+      setSettleResult(resultMsg);
+      setTimeout(() => setSettleResult(null), 10000);
       // Refresh settlement immediately (clears pending), then poll wallet
       // multiple times since the on-chain tx takes time to confirm
       fetchSettlement();

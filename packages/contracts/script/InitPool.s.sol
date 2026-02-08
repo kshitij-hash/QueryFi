@@ -15,7 +15,7 @@ contract InitPool is Script {
     IPoolManager constant POOL_MANAGER = IPoolManager(0x05E73354cFDd6745C338b50BcFDfA3Aa6fA03408);
 
     // Deployed hook address
-    address constant HOOK = 0x0cD33a7a876AF045e49a80f07C8c8eaF7A1bc040;
+    address constant HOOK = 0x974E39C679dd172eC68568cBa6f62CdF4BFeC040;
 
     // Base Sepolia USDC
     address constant USDC = 0x036CbD53842c5426634e7929541eC2318f3dCF7e;

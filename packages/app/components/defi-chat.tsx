@@ -36,14 +36,14 @@ const QUERY_PRICES: Record<string, number> = {
 };
 
 const EXAMPLE_QUERIES = [
-  { text: "Show Uniswap v4 pool state", price: "$0.01" },
+  { text: "Best stablecoin yields right now?", price: "$0.05" },
+  { text: "Show Uniswap v4 pool state on Base", price: "$0.01" },
+  { text: "Calculate IL for ETH if it goes from $2000 to $3000", price: "$0.03" },
   { text: "How many swaps has the hook tracked?", price: "$0.01" },
-  { text: "Lower settlement threshold to $0.50", price: "$0.01" },
+  { text: "Check my health factor on Aave V3", price: "$0.02" },
   { text: "Check agent wallet balance", price: "$0.01" },
-  { text: "Best yield for ETH?", price: "$0.05" },
-  { text: "Calculate IL for ETH $2000→$3000", price: "$0.03" },
-  { text: "What's the price of BTC?", price: "$0.01" },
-  { text: "What is a flash loan?", price: "$0.01" },
+  { text: "What's the current price of ETH?", price: "$0.01" },
+  { text: "Lower settlement threshold to $0.50", price: "$0.01" },
 ];
 
 export function DeFiChat() {
@@ -128,25 +128,49 @@ export function DeFiChat() {
       // Generate query ID
       const queryId = `q_${Date.now()}`;
 
-      // Determine price based on query type (simplified classification)
+      // Determine price based on query type
+      // For follow-ups ("what about X?"), inherit the price of the last user query
       let price = QUERY_PRICES.general_question;
       const lowerMsg = message.toLowerCase();
+      const isFollowUp = /^(what about|how about|and for|and on|same for|what if)\b/.test(lowerMsg);
+
       if (lowerMsg.includes("health") || lowerMsg.includes("liquidation")) {
         price = QUERY_PRICES.health_factor;
       } else if (lowerMsg.includes("yield") || lowerMsg.includes("apy")) {
         price = QUERY_PRICES.yield_search;
       } else if (lowerMsg.includes("impermanent") || lowerMsg.includes("il")) {
         price = QUERY_PRICES.il_calculation;
+      } else if (isFollowUp) {
+        const lastUserMsg = [...messages].reverse().find((m) => m.role === "assistant");
+        if (lastUserMsg?.cost) {
+          price = lastUserMsg.cost;
+        }
       }
 
       // Pay for query via state channel (instant, gasless)
-      await payForQuery(queryId, price);
+      const paymentResult = await payForQuery(queryId, price);
+
+      // Capture conversation history for context
+      const conversationHistory = messages
+        .filter((m) => m.role === "user" || m.role === "assistant")
+        .slice(-10)
+        .map(({ role, content }) => ({ role, content }));
 
       // Call AI backend API
       const res = await fetch("/api/query", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query: message, queryId, price }),
+        body: JSON.stringify({
+          query: message,
+          queryId,
+          price,
+          history: conversationHistory,
+          payment: {
+            appSessionId: paymentResult.appSessionId,
+            version: paymentResult.version,
+            amount: paymentResult.amount,
+          },
+        }),
       });
 
       const data = await res.json();

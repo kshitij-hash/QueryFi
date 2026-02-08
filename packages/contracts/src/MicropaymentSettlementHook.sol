@@ -238,6 +238,8 @@ contract MicropaymentSettlementHook is BaseHook, ReentrancyGuard {
     function _settle() internal {
         uint256 amount = accumulatedBalance;
         accumulatedBalance = 0;
+        settlementCount++;
+        totalSettled += amount;
 
         // Transfer to agent wallet
         IERC20(usdc).safeTransfer(agentWallet, amount);

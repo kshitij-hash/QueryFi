@@ -12,7 +12,7 @@ Deployed via HookMiner CREATE2 to derive an address with the correct v4 flag bit
 
 | Item | Value |
 |------|-------|
-| Address | [`0xe0d92A5e1D733517aa8b4b5Cf4A874722b30C040`](https://sepolia.basescan.org/address/0xe0d92A5e1D733517aa8b4b5Cf4A874722b30C040) |
+| Address | [`0x974E39C679dd172eC68568cBa6f62CdF4BFeC040`](https://sepolia.basescan.org/address/0x974E39C679dd172eC68568cBa6f62CdF4BFeC040) |
 | Pool | USDC/WETH, 3000 bps fee, tick spacing 60 |
 | PoolManager | [`0x05E73354cFDd6745C338b50BcFDfA3Aa6fA03408`](https://sepolia.basescan.org/address/0x05E73354cFDd6745C338b50BcFDfA3Aa6fA03408) |
 
@@ -33,7 +33,7 @@ forge build
 forge test -vvv
 ```
 
-86 tests (38 MicropaymentSettlementHook + 48 ArcSettlementHook) including fuzz tests.
+103 tests (55 MicropaymentSettlementHook + 48 ArcSettlementHook) including fuzz tests.
 
 ## Deploy
 

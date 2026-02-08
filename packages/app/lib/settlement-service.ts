@@ -10,23 +10,27 @@ import {
   addSettlementToHistory,
   getSettlementHistory as getPersistedHistory,
 } from "@/lib/settlement-tracker";
-import { createWalletClient, http, parseAbi, type Hex } from "viem";
-import { privateKeyToAccount } from "viem/accounts";
-import { baseSepolia, arcTestnet } from "viem/chains";
+import { executeContractCall } from "@/lib/circle-wallet";
 
 // Base Sepolia settlement config
-const SETTLEMENT_HOOK_ADDRESS = (process.env.SETTLEMENT_HOOK_ADDRESS ??
-  "0x0cD33a7a876AF045e49a80f07C8c8eaF7A1bc040") as Hex;
+const SETTLEMENT_HOOK_ADDRESS =
+  process.env.SETTLEMENT_HOOK_ADDRESS ?? "0x974E39C679dd172eC68568cBa6f62CdF4BFeC040";
 
 // Arc testnet settlement config (multi-chain treasury support)
 const ARC_HOOK_ADDRESS = process.env.ARC_SETTLEMENT_HOOK_ADDRESS as
-  | Hex
+  | string
+  | undefined;
+
+// Circle wallet ID for Arc testnet (separate SCA wallet on Arc chain)
+const ARC_CIRCLE_WALLET_ID = process.env.ARC_CIRCLE_WALLET_ID as
+  | string
   | undefined;
 
 const MAX_RETRIES = 3;
 const RETRY_BASE_DELAY_MS = 2000;
 
 interface SettlementResult {
+  /** Circle transaction UUID (Base Sepolia) or null */
   transactionId: string | null;
   arcTransactionHash: string | null;
   amount: number;
@@ -66,59 +70,33 @@ async function withRetry<T>(
 }
 
 /**
- * Get a viem wallet client for Base Sepolia using the agent private key.
- */
-function getBaseSepoliaClient() {
-  const privateKey = process.env.AGENT_PRIVATE_KEY as Hex | undefined;
-  if (!privateKey) {
-    throw new Error("AGENT_PRIVATE_KEY not configured");
-  }
-
-  const account = privateKeyToAccount(privateKey);
-  return createWalletClient({
-    account,
-    chain: baseSepolia,
-    transport: http(),
-  });
-}
-
-/**
  * Settle on Arc testnet by calling depositMicropayment() on the ArcSettlementHook
- * via a direct viem wallet client. Returns the tx hash or null if Arc is not configured.
+ * via Circle Wallets (executeContractCall with Arc wallet ID).
+ * Returns the Circle transaction ID or null if Arc is not configured.
  */
 async function settleOnArc(
   amount: number,
-  queryIdBytes32: Hex
+  queryIdBytes32: string
 ): Promise<string | null> {
-  if (!ARC_HOOK_ADDRESS) return null;
-
-  const privateKey = process.env.AGENT_PRIVATE_KEY as Hex | undefined;
-  if (!privateKey) {
-    console.warn(
-      "[Settlement] Arc settlement skipped: AGENT_PRIVATE_KEY not configured"
-    );
+  if (!ARC_HOOK_ADDRESS || !ARC_CIRCLE_WALLET_ID) {
+    if (ARC_HOOK_ADDRESS && !ARC_CIRCLE_WALLET_ID) {
+      console.warn(
+        "[Settlement] Arc settlement skipped: ARC_CIRCLE_WALLET_ID not configured"
+      );
+    }
     return null;
   }
 
   try {
-    const account = privateKeyToAccount(privateKey);
-    const client = createWalletClient({
-      account,
-      chain: arcTestnet,
-      transport: http("https://rpc.testnet.arc.network"),
-    });
+    const result = await executeContractCall(
+      ARC_HOOK_ADDRESS,
+      "depositMicropayment(uint256,bytes32)",
+      [amount.toString(), queryIdBytes32],
+      ARC_CIRCLE_WALLET_ID
+    );
 
-    const hash = await client.writeContract({
-      address: ARC_HOOK_ADDRESS,
-      abi: parseAbi([
-        "function depositMicropayment(uint256 amount, bytes32 queryId)",
-      ]),
-      functionName: "depositMicropayment",
-      args: [BigInt(amount), queryIdBytes32],
-    });
-
-    console.log(`[Settlement] Arc testnet deposit tx: ${hash}`);
-    return hash;
+    console.log(`[Settlement] Arc testnet Circle tx: ${result.transactionId}`);
+    return result.transactionId;
   } catch (error) {
     console.error(
       "[Settlement] Arc settlement failed:",
@@ -130,7 +108,7 @@ async function settleOnArc(
 
 /**
  * Triggers on-chain settlement by calling recordSettlement() on the hook contract
- * via direct viem wallet client (Base Sepolia) and optionally on Arc testnet.
+ * via Circle Wallets on Base Sepolia and optionally on Arc testnet.
  * recordSettlement() creates an on-chain audit trail AND transfers USDC from hook reserve.
  * Retries up to 3 times with exponential backoff.
  */
@@ -154,30 +132,26 @@ export async function triggerOnChainSettlement(): Promise<SettlementResult> {
       payments[payments.length - 1]?.queryId ?? "settlement";
     const queryIdBytes32 = stringToBytes32(latestQueryId);
 
-    // Record settlement on Base Sepolia via direct viem call.
+    // Record settlement on Base Sepolia via Circle Wallet SDK.
     // recordSettlement() creates an on-chain audit trail (event + counters)
     // AND transfers USDC from the hook's pre-funded reserve to the agent wallet.
-    const txHash = await withRetry(
-      async () => {
-        const client = getBaseSepoliaClient();
-        return client.writeContract({
-          address: SETTLEMENT_HOOK_ADDRESS,
-          abi: parseAbi([
-            "function recordSettlement(uint256 amount, bytes32 queryId)",
-          ]),
-          functionName: "recordSettlement",
-          args: [BigInt(accumulated), queryIdBytes32 as Hex],
-        });
-      },
+    const circleResult = await withRetry(
+      () =>
+        executeContractCall(
+          SETTLEMENT_HOOK_ADDRESS,
+          "recordSettlement(uint256,bytes32)",
+          [accumulated.toString(), queryIdBytes32]
+        ),
       "recordSettlement"
     );
+    const txHash = circleResult.transactionId;
 
-    console.log(`[Settlement] Base Sepolia tx: ${txHash}`);
+    console.log(`[Settlement] Base Sepolia Circle tx: ${txHash}`);
 
     // Record on Arc testnet (best-effort, non-blocking)
     const arcTxHash = await settleOnArc(
       accumulated,
-      queryIdBytes32 as Hex
+      queryIdBytes32
     );
 
     // Reset tracker after successful Base Sepolia submission
@@ -213,20 +187,18 @@ export async function triggerOnChainSettlement(): Promise<SettlementResult> {
 export async function flushHookBalance(): Promise<{
   transactionId: string | null;
 }> {
-  const txHash = await withRetry(
-    async () => {
-      const client = getBaseSepoliaClient();
-      return client.writeContract({
-        address: SETTLEMENT_HOOK_ADDRESS,
-        abi: parseAbi(["function settleNow()"]),
-        functionName: "settleNow",
-        args: [],
-      });
-    },
+  const circleResult = await withRetry(
+    () =>
+      executeContractCall(
+        SETTLEMENT_HOOK_ADDRESS,
+        "settleNow()",
+        []
+      ),
     "settleNow"
   );
+  const txHash = circleResult.transactionId;
 
-  console.log(`[Settlement] settleNow called on hook: tx ${txHash}`);
+  console.log(`[Settlement] settleNow called via Circle SDK: tx ${txHash}`);
 
   return { transactionId: txHash };
 }
